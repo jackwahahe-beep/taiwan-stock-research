@@ -3,6 +3,7 @@
 用法：
   python tw_scheduler.py              # 立即執行一次（掃描 + 持股追蹤）
   python tw_scheduler.py --backtest   # 掃描 + 持股追蹤 + 重新回測
+  python tw_scheduler.py --dca        # 執行 DCA 長期回測並推播
   python tw_scheduler.py --daemon     # 常駐排程
 """
 
@@ -85,8 +86,28 @@ def run_daemon():
         time.sleep(30)
 
 
+def run_dca():
+    from tw_backtest_dca import run_dca_all, build_dca_embed, load_dca_cache
+    from tw_discord import send_webhook, load_config as discord_cfg
+
+    print(f"\n{'='*50}")
+    print(f"DCA 長期回測啟動 {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}\n")
+
+    results = run_dca_all()
+    cfg = discord_cfg()
+    url = cfg["discord"]["webhook_url"]
+    embeds = [build_dca_embed(r) for r in results]
+    for i in range(0, len(embeds), 10):
+        ok = send_webhook({"embeds": embeds[i:i+10]}, url)
+        print(f"[Discord] DCA 推播 {len(embeds[i:i+10])} 個 — {'成功' if ok else '失敗'}")
+    print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
+
+
 if __name__ == "__main__":
     if "--daemon" in sys.argv:
         run_daemon()
+    elif "--dca" in sys.argv:
+        run_dca()
     else:
         run_once(run_backtest="--backtest" in sys.argv)

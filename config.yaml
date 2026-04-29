@@ -37,6 +37,24 @@ discord:
   webhook_url: "${DISCORD_WEBHOOK_URL}"
   mention_role: ""     # 可選，填 Discord role ID 例如 "<@&123456>"
 
+# 個人持股（用於 P&L 追蹤與賣出提示）
+portfolio:
+  - symbol: "00713.TW"
+    name: "元大台灣高息低波"
+    shares: 2000
+    cost: 47.58
+    note: "持有中"
+  - symbol: "2409.TW"
+    name: "友達"
+    shares: 400
+    cost: 27.41
+    note: "待機賣出"
+  - symbol: "2618.TW"
+    name: "長榮航"
+    shares: 59
+    cost: 0
+    note: "配股，觀察中"
+
 # 排程
 schedule:
   # 台股盤前掃描（09:00 開盤，08:45 掃描）

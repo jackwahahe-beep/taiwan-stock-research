@@ -1,6 +1,6 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-04-29
+> 上次更新：2026-04-29（Session 2 計畫中）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
 
 ---
@@ -95,11 +95,25 @@ python tw_scheduler.py --daemon
 
 ---
 
-## 下一步建議（Next Session）
+## Session 2 計畫（進行中，2026-04-29）
 
-### 高優先
-1. **Webhook URL 移出 git** — 新增 `.env` 檔，用 `python-dotenv` 讀取；將 `config.yaml` 中的 URL 改為 `${DISCORD_WEBHOOK_URL}`
-2. **ETF 資料源修復** — 嘗試 `yf.download()` 批次拉取取代 `Ticker.history()`，或導入 FinMind API 作為備援
+### 新功能：持股追蹤 + 賣出提示
+用戶持股：
+- **00713.TW** 元大台灣高息低波 2,000 股，成本 47.58，現價 53，+11.12%（持有中）
+- **2409.TW** 友達 400 股，成本 27.41，現價 17.3，-37.15%（待機賣出）
+- **2618.TW** 長榮航 59 股，成本 0（配股），現價 34（觀察中）
+
+實作項目：
+1. `config.yaml` 新增 `portfolio` 區塊（持股清單 + 成本）
+2. 新建 `tw_portfolio.py` — P&L 計算 + 技術信號疊加 + 賣出建議
+3. `tw_scheduler.py` 每日推播加入持股摘要 embed
+4. 更新 `FUNCTION_SPEC.md` / `AI_HANDOFF.md`
+
+### 下一步建議（Next Session）
+
+### 高優先（已完成）
+1. ✅ Webhook URL 移出 git（.env）
+2. ✅ ETF NaN 修復（dropna 取最後有效收盤）
 
 ### 中優先
 3. **重構 scheduler 模式傳遞** — 用 `enum` 或 `dataclass` 取代 `sys.argv` 操作

@@ -31,11 +31,23 @@ def run_once():
     print(f"台股掃描啟動 {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}")
 
+    cfg = load_config()
+
     # 1. 信號掃描 + 推播
     results = run_scan()
     send_scan_results(results)
 
-    # 2. 回測（僅盤後執行，或手動觸發時）
+    # 2. 持股追蹤 + 推播
+    from tw_portfolio import run_portfolio_check, build_portfolio_embeds
+    print(f"\n--- 持股追蹤 ---")
+    portfolio_results = run_portfolio_check()
+    if portfolio_results:
+        portfolio_embeds = build_portfolio_embeds(portfolio_results)
+        for i in range(0, len(portfolio_embeds), 10):
+            send_webhook({"embeds": portfolio_embeds[i:i+10]}, cfg["discord"]["webhook_url"])
+        print(f"持股摘要已推播至 Discord")
+
+    # 3. 回測（僅盤後執行，或手動觸發時）
     if "--backtest" in sys.argv or "--post" in sys.argv:
         print(f"\n--- 執行策略回測 ---")
         bt_results = run_backtest_all()

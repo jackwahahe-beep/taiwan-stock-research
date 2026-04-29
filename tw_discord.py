@@ -278,22 +278,55 @@ def build_market_mode_embed(results: list[dict]) -> dict | None:
     if not strong_buys and not buys and not sells:
         lines.append("今日無明確買入/賣出信號")
 
-    # 近信號預警（距試買觸發 < 5%，提醒準備預算）
+    fields = []
+
+    # 今日關鍵價位總覽
     try:
         from tw_screener import SIGNAL_CONFIG, _DEFAULT_CFG
         near = []
+        price_lines = []
         for r in results:
-            if any(s["type"] in ("BUY", "STRONG BUY") for s in r.get("signals", [])):
-                continue  # 已觸發，不算近
-            avwap = r.get("avwap", 0)
+            sym   = r["symbol"]
             price = r.get("price", 0)
+            avwap = r.get("avwap", 0)
             if not avwap or not price:
                 continue
-            scfg = SIGNAL_CONFIG.get(r["symbol"], _DEFAULT_CFG)
+            scfg = SIGNAL_CONFIG.get(sym, _DEFAULT_CFG)
             b1   = avwap * scfg["b1"]
-            dist = (price - b1) / b1 * 100
-            if 0 < dist < 5:
-                near.append(f"{r['symbol'].replace('.TW','')} 距試買 `+{dist:.1f}%`")
+            b2   = avwap * scfg["b2"]
+            s    = avwap * scfg["s"]
+
+            # 信號標示
+            sigs = [x["type"] for x in r.get("signals", [])]
+            if "STRONG BUY" in sigs:
+                flag = "🟢🟢"
+            elif "BUY" in sigs:
+                flag = "🟢"
+            elif "SELL" in sigs:
+                flag = "🔴"
+            else:
+                flag = "⬜"
+
+            # 近信號偵測（尚未觸發但距試買 < 5%）
+            if flag == "⬜":
+                dist = (price - b1) / b1 * 100
+                if 0 < dist < 5:
+                    flag = "📍"
+                    near.append(f"{sym.replace('.TW','')} 距試買 `+{dist:.1f}%`")
+
+            short = sym.replace(".TW", "").ljust(5)
+            price_lines.append(
+                f"{flag} `{short}` 現 **{price:,.0f}**　"
+                f"試買 `{b1:,.0f}`　加碼 `{b2:,.0f}`　賣出 `{s:,.0f}`"
+            )
+
+        if price_lines:
+            fields.append({
+                "name":  "📋 今日關鍵價位（試買=AVWAP×b1　加碼=AVWAP×b2　賣出=AVWAP×s）",
+                "value": "\n".join(price_lines),
+                "inline": False,
+            })
+
         if near:
             lines.append("\n📍 準備預算（距試買觸發 < 5%）：" + "、".join(near))
     except Exception:
@@ -303,6 +336,7 @@ def build_market_mode_embed(results: list[dict]) -> dict | None:
         "color":       color,
         "title":       f"📊 台股每日掃描｜{datetime.now(TZ).strftime('%Y-%m-%d')}",
         "description": "\n".join(lines),
+        "fields":      fields,
         "footer":      {"text": datetime.now(TZ).strftime("%Y-%m-%d %H:%M")},
     }
 

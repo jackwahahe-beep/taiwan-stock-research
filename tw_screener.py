@@ -32,7 +32,7 @@ SIGNAL_CONFIG = {
     "00878.TW":  {"rsi_buy": 42, "rsi_sbuy": 32, "rsi_sell": 65, "b1": 0.97, "b2": 0.92, "s": 1.10},
     "00713.TW":  {"rsi_buy": 42, "rsi_sbuy": 32, "rsi_sell": 65, "b1": 0.97, "b2": 0.92, "s": 1.10},
     "00929.TW":  {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 68, "b1": 0.98, "b2": 0.93, "s": 1.10},
-    "00919.TW":  {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 68, "b1": 0.98, "b2": 0.93, "s": 1.10},
+    "00919.TW":  {"rsi_buy": 50, "rsi_sbuy": 40, "rsi_sell": 68, "b1": 0.98, "b2": 0.93, "s": 1.10},
     # 大型科技 — 強者恆強，RSI 50 以下才算便宜
     "2330.TW":   {"rsi_buy": 50, "rsi_sbuy": 40, "rsi_sell": 75, "b1": 0.97, "b2": 0.91, "s": 1.15},
     "2454.TW":   {"rsi_buy": 50, "rsi_sbuy": 40, "rsi_sell": 75, "b1": 0.97, "b2": 0.91, "s": 1.15},
@@ -40,8 +40,8 @@ SIGNAL_CONFIG = {
     "2308.TW":   {"rsi_buy": 50, "rsi_sbuy": 40, "rsi_sell": 75, "b1": 0.97, "b2": 0.91, "s": 1.15},
     # 中型科技 — 波動較大，閾值稍放寬
     "3711.TW":   {"rsi_buy": 48, "rsi_sbuy": 38, "rsi_sell": 72, "b1": 0.97, "b2": 0.91, "s": 1.13},
-    "2303.TW":   {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 70, "b1": 0.97, "b2": 0.91, "s": 1.12},
-    "3037.TW":   {"rsi_buy": 48, "rsi_sbuy": 38, "rsi_sell": 72, "b1": 0.97, "b2": 0.91, "s": 1.13},
+    "2303.TW":   {"rsi_buy": 45, "rsi_sbuy": 45, "rsi_sell": 70, "b1": 0.97, "b2": 0.97, "s": 1.12},
+    "3037.TW":   {"rsi_buy": 48, "rsi_sbuy": 38, "rsi_sell": 72, "b1": 0.97, "b2": 0.91, "s": 1.13, "bnh_dca": True},
     "2408.TW":   {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 70, "b1": 0.97, "b2": 0.91, "s": 1.12},
     "6770.TW":   {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 70, "b1": 0.97, "b2": 0.91, "s": 1.12},
 }

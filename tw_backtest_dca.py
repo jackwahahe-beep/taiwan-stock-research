@@ -223,16 +223,25 @@ def run_dca_backtest(symbol: str, name: str, cfg: dict,
     mode_aligned = mode_series.reindex(close.index, method="ffill").fillna("NORMAL")
     market_dip   = mode_aligned.isin(["WARN", "RISK"])
 
-    strategies = [
-        _run_dca(close, high, low, volume, symbol,
-                 allow_buy=None,        label="B&H DCA（無條件）"),
-        _run_dca(close, high, low, volume, symbol,
-                 allow_buy=buy_filter,  label="v2 BUY DCA"),
-        _run_dca(close, high, low, volume, symbol,
-                 allow_buy=sbuy_filter, label="v2 STRONG BUY DCA"),
-        _run_dca(close, high, low, volume, symbol,
-                 allow_buy=market_dip,  label="市場警戒逆向加碼"),
-    ]
+    # bnh_dca 旗標：超強趨勢股不做擇時，全部策略都用 B&H
+    is_bnh_only = stock_cfg.get("bnh_dca", False)
+
+    if is_bnh_only:
+        strategies = [
+            _run_dca(close, high, low, volume, symbol,
+                     allow_buy=None, label="B&H DCA（趨勢股，無條件）"),
+        ]
+    else:
+        strategies = [
+            _run_dca(close, high, low, volume, symbol,
+                     allow_buy=None,        label="B&H DCA（無條件）"),
+            _run_dca(close, high, low, volume, symbol,
+                     allow_buy=buy_filter,  label="v2 BUY DCA"),
+            _run_dca(close, high, low, volume, symbol,
+                     allow_buy=sbuy_filter, label="v2 STRONG BUY DCA"),
+            _run_dca(close, high, low, volume, symbol,
+                     allow_buy=market_dip,  label="市場警戒逆向加碼"),
+        ]
 
     crashes = _crash_performance(close)
     result  = {

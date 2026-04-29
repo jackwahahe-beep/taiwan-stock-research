@@ -54,6 +54,16 @@ def calc_signals(df: pd.DataFrame, cfg: dict) -> dict:
     ma_slow = close.rolling(sig_cfg["ma"]["slow"]).mean()
     vol_ma20 = volume.rolling(20).mean()
 
+    # 開盤前拉資料時當日收盤為 NaN，取最後一筆有效值
+    close = close.dropna()
+    if close.empty:
+        return {}
+    rsi = rsi.reindex(close.index)
+    ma_fast = ma_fast.reindex(close.index)
+    ma_slow = ma_slow.reindex(close.index)
+    volume = volume.reindex(close.index)
+    vol_ma20 = vol_ma20.reindex(close.index)
+
     price_val = close.iloc[-1]
     rsi_val = rsi.iloc[-1]
     if np.isnan(price_val) or np.isnan(rsi_val):

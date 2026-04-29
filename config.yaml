@@ -34,7 +34,7 @@ signals:
 
 # Discord Webhook（執行前填入你的 URL）
 discord:
-  webhook_url: "YOUR_DISCORD_WEBHOOK_URL_HERE"
+  webhook_url: "${DISCORD_WEBHOOK_URL}"
   mention_role: ""     # 可選，填 Discord role ID 例如 "<@&123456>"
 
 # 排程

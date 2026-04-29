@@ -4,14 +4,17 @@ Discord Webhook 推播模組
 - 依信號類型配色：BUY=綠、SELL=紅、WATCH=黃
 """
 
+import os
 import requests
 import yaml
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).parent
 TZ = ZoneInfo("Asia/Taipei")
+load_dotenv(BASE_DIR / ".env")
 
 COLOR = {
     "BUY": 0x2ECC71,    # 綠
@@ -23,7 +26,12 @@ COLOR = {
 
 def load_config() -> dict:
     with open(BASE_DIR / "config.yaml", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    # 從環境變數覆寫 webhook URL
+    env_url = os.getenv("DISCORD_WEBHOOK_URL")
+    if env_url:
+        cfg["discord"]["webhook_url"] = env_url
+    return cfg
 
 
 def send_webhook(payload: dict, webhook_url: str) -> bool:

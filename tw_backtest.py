@@ -8,7 +8,6 @@
 比較：B&H、BUY策略、STRONG_BUY策略
 """
 
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import yaml
@@ -17,7 +16,7 @@ import glob as _glob
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from tw_screener import calc_rsi, load_config, SIGNAL_CONFIG, _DEFAULT_CFG
+from tw_screener import calc_rsi, load_config, fetch_data, SIGNAL_CONFIG, _DEFAULT_CFG
 
 BASE_DIR  = Path(__file__).parent
 CACHE_DIR = BASE_DIR / "cache"
@@ -25,12 +24,7 @@ TZ        = ZoneInfo("Asia/Taipei")
 
 
 def fetch_long(symbol: str, period: str = "2y") -> pd.DataFrame:
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, auto_adjust=True)
-    if df.empty:
-        return df
-    df.index = df.index.tz_convert(TZ)
-    return df
+    return fetch_data(symbol, period=period)
 
 
 # ── 滾動 AVWAP（與 tw_screener 邏輯一致）──────────────────────────────────────
@@ -99,6 +93,7 @@ def _run_backtest_v2(
     position    = 0.0
     entry_price = 0.0
     trades      = []
+    pv_list     = []   # daily portfolio value for MDD + Sharpe
 
     for i in range(60, len(close)):
         price   = float(close.iloc[i])
@@ -140,12 +135,31 @@ def _run_backtest_v2(
             cash    += position * price
             position = 0
 
+        pv_list.append(cash + position * price)
+
     final_value  = cash + position * float(close.dropna().iloc[-1])
     total_return = (final_value - init_cash) / init_cash * 100
 
+    # MDD
+    mdd = None
+    if pv_list:
+        pv    = pd.Series(pv_list, dtype=float)
+        peak  = pv.cummax()
+        dd_s  = (pv - peak) / peak.replace(0, np.nan) * 100
+        mdd   = round(float(dd_s.min()), 2)
+
+    # Sharpe（年化，無風險利率 0）
+    sharpe = None
+    if len(pv_list) >= 20:
+        pv       = pd.Series(pv_list, dtype=float)
+        ret_daily = pv.pct_change().dropna()
+        if ret_daily.std() > 0:
+            sharpe = round(float(ret_daily.mean() / ret_daily.std() * np.sqrt(252)), 2)
+
     if not trades:
         return {"label": label, "total_return_pct": round(total_return, 2),
-                "trades": 0, "win_rate": None, "avg_pnl_pct": None, "max_loss_pct": None}
+                "trades": 0, "win_rate": None, "avg_pnl_pct": None,
+                "max_loss_pct": None, "max_drawdown_pct": mdd, "sharpe": sharpe}
 
     pnls = [t["pnl_pct"] for t in trades]
     wins = [p for p in pnls if p > 0]
@@ -156,6 +170,8 @@ def _run_backtest_v2(
         "win_rate":         round(len(wins) / len(trades) * 100, 1),
         "avg_pnl_pct":      round(np.mean(pnls), 2),
         "max_loss_pct":     round(min(pnls), 2),
+        "max_drawdown_pct": mdd,
+        "sharpe":           sharpe,
         "trade_log":        trades[-5:],
     }
 
@@ -217,11 +233,13 @@ def run_backtest_all(period: str = "2y") -> list[dict]:
 def build_backtest_embed(bt: dict) -> dict:
     lines = []
     for s in bt["strategies"]:
-        wr   = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
-        flag = "✅" if s["total_return_pct"] > bt["bnh_return_pct"] else "⚠️"
+        wr     = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
+        mdd    = f"{s['max_drawdown_pct']}%" if s.get("max_drawdown_pct") is not None else "N/A"
+        sharpe = f"{s['sharpe']}" if s.get("sharpe") is not None else "N/A"
+        flag   = "✅" if s["total_return_pct"] > bt["bnh_return_pct"] else "⚠️"
         lines.append(
             f"{flag} **{s['label']}** — 總報酬 `{s['total_return_pct']}%`  "
-            f"勝率 `{wr}`  交易 `{s['trades']}` 次"
+            f"勝率 `{wr}`  MDD `{mdd}`  Sharpe `{sharpe}`"
         )
     lines.append(f"📌 B&H 基準: `{bt['bnh_return_pct']}%`（{bt['period']}）")
     return {

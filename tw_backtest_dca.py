@@ -26,6 +26,25 @@ ANNUAL_BUDGET = 100_000
 START_YEAR    = 2015
 END_YEAR      = 2025
 
+# 各股建議 DCA 策略（根據 10 年回測收斂結果）
+RECOMMENDED_DCA = {
+    "0050.TW":   "B&H DCA（無條件）",
+    "006208.TW": "B&H DCA（無條件）",
+    "00878.TW":  "v2 BUY DCA",           # MDD -21%→-10%，風險調整收斂
+    "00713.TW":  "v2 BUY DCA",           # MDD -26%→-17%，風險調整收斂
+    "00929.TW":  "v2 STRONG BUY DCA",    # +11pp（資料3年，謹慎參考）
+    "00919.TW":  "B&H DCA（無條件）",
+    "2330.TW":   "B&H DCA（無條件）",
+    "2454.TW":   "v2 BUY DCA",           # +7pp
+    "3711.TW":   "B&H DCA（無條件）",    # 差距小，任一可
+    "2303.TW":   "B&H DCA（無條件）",
+    "6770.TW":   "v2 STRONG BUY DCA",    # +22pp
+    "2382.TW":   "B&H DCA（無條件）",
+    "2308.TW":   "v2 STRONG BUY DCA",    # +191pp
+    "3037.TW":   "B&H DCA（趨勢股，無條件）",
+    "2408.TW":   "v2 BUY DCA",           # +24pp，2026-04-29 升格
+}
+
 CRASH_PERIODS = [
     ("2015-06-01", "2015-09-30", "中國股災 2015"),
     ("2018-10-01", "2018-12-31", "美中貿易戰 2018"),
@@ -302,12 +321,16 @@ def build_dca_embed(bt: dict) -> dict:
     if not strategies:
         return {"color": 0x95A5A6, "title": bt["symbol"], "description": "無策略結果"}
 
+    recommended = RECOMMENDED_DCA.get(bt["symbol"], "")
     best  = max(strategies, key=lambda s: s["total_return_pct"])
     lines = []
     for s in strategies:
-        flag = "🏆" if s["label"] == best["label"] else "  "
+        is_rec  = (s["label"] == recommended)
+        is_best = (s["label"] == best["label"])
+        flag = "🏆" if is_best else "  "
+        rec_tag = "　⭐建議" if is_rec else ""
         lines.append(
-            f"{flag} **{s['label']}**\n"
+            f"{flag} **{s['label']}**{rec_tag}\n"
             f"　總報酬 `{s['total_return_pct']}%`　"
             f"CAGR `{s['cagr_pct']}%`　"
             f"最大回撤 `{s['max_drawdown_pct']}%`"
@@ -323,6 +346,8 @@ def build_dca_embed(bt: dict) -> dict:
 
     fields = [{"name": f"📊 策略比較（每年 NT${bt['annual_budget']:,}，{bt['period']}）",
                "value": "\n".join(lines), "inline": False}]
+    if recommended:
+        fields.append({"name": "⭐ 建議策略", "value": f"`{recommended}`", "inline": False})
     if crash_lines:
         fields.append({"name": "🌪️ 股災期間最大跌幅",
                         "value": "\n".join(crash_lines), "inline": False})

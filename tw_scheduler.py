@@ -11,12 +11,23 @@ import sys
 import time
 import yaml
 import schedule
-from datetime import datetime
+import holidays
+from datetime import datetime, date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).parent
 TZ = ZoneInfo("Asia/Taipei")
+
+
+def is_trading_day(d: date | None = None) -> bool:
+    """回傳 True 代表台灣股市交易日（非週末且非國定假日）。"""
+    if d is None:
+        d = datetime.now(TZ).date()
+    if d.weekday() >= 5:  # 週六=5, 週日=6
+        return False
+    tw_holidays = holidays.TW(years=d.year)
+    return d not in tw_holidays
 
 
 def load_config() -> dict:
@@ -25,6 +36,11 @@ def load_config() -> dict:
 
 
 def run_once(run_backtest: bool = False):
+    if not is_trading_day():
+        today = datetime.now(TZ).strftime('%Y-%m-%d (%a)')
+        print(f"[跳過] {today} 非台灣交易日（週末或國定假日）")
+        return
+
     from tw_screener import run_scan
     from tw_discord import send_scan_results, send_webhook, load_config as discord_cfg
     from tw_backtest import run_backtest_all, build_backtest_embed, load_backtest_cache
@@ -65,6 +81,33 @@ def run_once(run_backtest: bool = False):
     else:
         print(f"持股無操作信號，靜默（持有中）")
 
+    # 4. 事後驗證（盤後才跑，評分 LOOK_AHEAD 天前的信號）
+    if run_backtest:
+        try:
+            from tw_outcome import grade_date, LOOK_AHEAD
+            import holidays as _holidays
+            today_d   = datetime.now(TZ).date()
+            candidate = today_d - timedelta(days=1)
+            tw_hols   = _holidays.TW(years=candidate.year)
+            count = 0
+            while count < LOOK_AHEAD:
+                if candidate.weekday() < 5 and candidate not in tw_hols:
+                    count += 1
+                if count < LOOK_AHEAD:
+                    candidate -= timedelta(days=1)
+            print(f"\n--- 信號事後驗證（評分 {candidate.isoformat()}）---")
+            outcome = grade_date(candidate.isoformat())
+            if outcome:
+                from tw_discord import build_outcome_embed
+                embed = build_outcome_embed(outcome)
+                if embed:
+                    from tw_discord import send_webhook, load_config as discord_cfg
+                    cfg2 = discord_cfg()
+                    send_webhook({"embeds": [embed]}, cfg2["discord"]["webhook_url"])
+                    print("[Discord] 信號驗證推播")
+        except Exception as e:
+            print(f"    [!] 事後驗證失敗：{e}")
+
     print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
 
 
@@ -75,15 +118,35 @@ def run_daemon():
 
     schedule.every().day.at(pre).do(run_once, run_backtest=False)
     schedule.every().day.at(post).do(run_once, run_backtest=True)
+    schedule.every().friday.at("17:00").do(run_weekly_report)
 
     print(f"排程常駐模式啟動")
     print(f"  盤前 {pre}：掃描 + 持股追蹤（用快取回測）")
     print(f"  盤後 {post}：掃描 + 持股追蹤 + 重新回測")
+    print(f"  每週五 17:00：週報摘要推播")
     print(f"  按 Ctrl+C 停止\n")
 
     while True:
         schedule.run_pending()
         time.sleep(30)
+
+
+def run_weekly_report():
+    """每週五發送本週信號統計摘要。"""
+    from tw_discord import build_weekly_embed, send_webhook, load_config as discord_cfg
+
+    print(f"\n{'='*50}")
+    print(f"週報摘要 {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}")
+
+    embed = build_weekly_embed(BASE_DIR / "cache")
+    if embed is None:
+        print("無快取資料，跳過週報")
+        return
+
+    cfg = discord_cfg()
+    ok  = send_webhook({"embeds": [embed]}, cfg["discord"]["webhook_url"])
+    print(f"[Discord] 週報推播 — {'成功' if ok else '失敗'}")
 
 
 def run_dca():
@@ -109,5 +172,22 @@ if __name__ == "__main__":
         run_daemon()
     elif "--dca" in sys.argv:
         run_dca()
+    elif "--weekly" in sys.argv:
+        run_weekly_report()
+    elif "--outcome" in sys.argv:
+        from tw_outcome import grade_date, compute_rolling_accuracy
+        target = sys.argv[2] if len(sys.argv) > 2 else None
+        if target:
+            grade_date(target)
+        else:
+            stats = compute_rolling_accuracy(30)
+            if stats:
+                print(f"近 {stats['days']} 日滾動正確率：")
+                for sig, v in stats["signals"].items():
+                    acc = f"{v['accuracy']:.0%}" if v["accuracy"] else "N/A"
+                    avg = f"{v['avg_pct']:+.2f}%" if v["avg_pct"] is not None else "N/A"
+                    print(f"  {sig:12} {v['correct']}/{v['total']} 正確率 {acc}  平均報酬 {avg}")
+            else:
+                print("無 outcome 資料")
     else:
         run_once(run_backtest="--backtest" in sys.argv)

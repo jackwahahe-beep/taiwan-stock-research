@@ -1,6 +1,6 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-04-29（Session 4 完成）
+> 上次更新：2026-04-29（Session 6 完成）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
 > 最新 commit：904747f
 
@@ -91,6 +91,7 @@ RSI ≥ rsi_sell **且** 價格 ≥ AVWAP×s **且** 價格 > MA20×1.15
 | 台達電（2308） | **v2 STRONG BUY DCA** | 1,393% vs B&H 1,202%，高波動股擇時有效 |
 | 力積電（6770） | **v2 STRONG BUY DCA** | 89% vs B&H 67%，高波動股擇時有效 |
 | 聯發科（2454） | **v2 BUY DCA** | 微勝 B&H（844% vs 837%）且略降回撤 |
+| 南亞科（2408） | **v2 BUY DCA** | 435% vs B&H 411%（+24pp），Session 5 升格 |
 | 日月光（3711） | 接近 B&H，**任一皆可** | 差異不超過 5% |
 
 ### 股災期間表現（最大跌幅）
@@ -180,18 +181,30 @@ python tw_scheduler.py --daemon
 
 ## 待辦事項（Next Session）
 
-### 🔴 需要確認
-- [ ] FUNCTION_SPEC.md 更新至 v2（目前還是舊版策略描述）
-- [ ] 友達（2409）出場策略是否有信號？（待機賣出中）
-
-### 🟡 優化
-- [ ] `tw_portfolio.py` 的 `get_sell_advice()` 信號邏輯也引用 v2 SIGNAL_CONFIG（目前只用舊RSI/MA）
-- [ ] 市場模式推播 header 加入 TWII 現價 vs MA200 具體數字
-- [ ] DCA 回測 Discord embed 增加「建議策略」欄位（根據回測結論自動推薦）
-
 ### 🟢 低優先
-- [ ] 台灣假日過濾（避免假日觸發推播）
-- [ ] 合併 `tw_screener.fetch_data` 和 `tw_backtest.fetch_long` 為共用函數
+- [ ] scheduler 模式重構（以 enum 取代 sys.argv）
+- [ ] 友達（2409）現價 NT$17.30，虧損 -37%，純等反彈推播，無停損機制
+
+---
+
+## Session 6 完成事項（2026-04-29）
+
+1. **`_detect_bounce()` v2 化** — 改用個股 `rsi_sbuy` 取代硬碼 30；新增第 4 條件：價格從 AVWAP×0.97 以下回升至 AVWAP 附近
+2. **回測加 MDD / Sharpe** — `_run_backtest_v2()` 新增 `pv_list` 逐日追蹤，計算最大回撤與年化 Sharpe；`build_backtest_embed()` 顯示兩項指標
+3. **週報摘要功能** — `tw_discord.build_weekly_embed()` 讀取過去 7 天 scan cache，統計各股買賣信號次數 + 市場模式分布；`tw_scheduler.run_weekly_report()` 推播至 Discord；每週五 17:00 自動觸發；可手動 `python tw_scheduler.py --weekly`
+
+---
+
+## Session 5 完成事項（2026-04-29）
+
+1. **確認友達（2409）出場信號** — 現價 NT$17.30，虧損 -37%，無反彈信號，維持 EXIT_WAIT
+2. **FUNCTION_SPEC.md 全面重寫至 v2** — AVWAP+DD+市場模式+個股RSI 架構完整記錄
+3. **台灣假日過濾** — `is_trading_day()` 加入 `tw_scheduler.py`；`holidays` 加入 requirements.txt
+4. **合併 fetch_data / fetch_long** — tw_backtest.py 改 import tw_screener.fetch_data
+5. **`get_sell_advice` 修正** — 補傳 `symbol` 至 `calc_signals`，持股判斷現使用個股 SIGNAL_CONFIG
+6. **市場模式 header 加具體數字** — TWII 現價 / MA200 / 差距% / 波動率 顯示在每日推播
+7. **DCA embed 加建議策略** — `RECOMMENDED_DCA` 字典定義各股最佳策略；embed 加 ⭐建議標記
+8. **2408 南亞科升格 v2 BUY DCA** — 10年 +24pp 收斂，加入 RECOMMENDED_DCA
 
 ---
 

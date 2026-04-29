@@ -5,8 +5,6 @@ watchlist:
       name: "元大台灣50"
     - symbol: "00878.TW"
       name: "國泰永續高股息"
-    - symbol: "006208.TW"
-      name: "富邦台50"
     - symbol: "00713.TW"
       name: "元大台灣高息低波"
     - symbol: "00929.TW"
@@ -22,8 +20,6 @@ watchlist:
       name: "日月光投控"
     - symbol: "2303.TW"
       name: "聯華電子"
-    - symbol: "6770.TW"
-      name: "力積電"
     - symbol: "2382.TW"
       name: "廣達"               # AI伺服器最大受益者
     - symbol: "2308.TW"

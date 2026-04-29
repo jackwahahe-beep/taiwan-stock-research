@@ -50,35 +50,48 @@ def calc_holding(holding: dict, price: float) -> dict:
 
 def _detect_bounce(symbol: str, cfg: dict) -> tuple[bool, list[str]]:
     """
-    偵測反彈信號，用於「待機賣出」股票。
-    回傳 (is_bounce, reasons)
-    條件：RSI 由超賣區（<30）回升超過 40，或短期均線由下彎轉上
+    偵測反彈信號，用於「待機賣出」股票（v2）。
+    使用個股 SIGNAL_CONFIG 的 rsi_sbuy 閾值，並加入 AVWAP 回升確認。
     """
     try:
+        from tw_screener import SIGNAL_CONFIG, _DEFAULT_CFG, calc_avwap
         df = fetch_data(symbol, period="6mo")
         if df.empty or len(df) < 20:
             return False, []
+
+        stock_cfg = SIGNAL_CONFIG.get(symbol, _DEFAULT_CFG)
+        rsi_sbuy  = stock_cfg["rsi_sbuy"]
+
         close = df["Close"].dropna()
-        rsi = calc_rsi(close)
-        ma5 = close.rolling(5).mean()
-        ma20 = close.rolling(20).mean()
+        rsi   = calc_rsi(close)
+        ma5   = close.rolling(5).mean()
+        ma20  = close.rolling(20).mean()
+        avwap = calc_avwap(df, lookback=60)
+
+        price_now = float(close.iloc[-1])
+        rsi_now   = float(rsi.iloc[-1])
 
         reasons = []
 
-        # RSI 從超賣反彈回 40 以上
+        # 1. RSI 從個股超賣閾值反彈（v2：用個股 rsi_sbuy 取代硬碼 30）
         rsi_prev = rsi.iloc[-6:-1]
-        rsi_now = rsi.iloc[-1]
-        if any(v < 30 for v in rsi_prev) and rsi_now > 40:
-            reasons.append(f"RSI 由超賣區反彈至 {round(rsi_now, 1)}，短線回升機會")
+        if any(v <= rsi_sbuy for v in rsi_prev) and rsi_now > rsi_sbuy + 10:
+            reasons.append(f"RSI 由超賣（≤{rsi_sbuy}）反彈至 {round(rsi_now, 1)}")
 
-        # MA5 由下穿 MA20 後回穿（黃金交叉短期版）
+        # 2. MA5 黃金交叉 MA20
         if (ma5.iloc[-2] <= ma20.iloc[-2]) and (ma5.iloc[-1] > ma20.iloc[-1]):
             reasons.append("MA5 黃金交叉 MA20，短線動能回升")
 
-        # 近 5 日連漲
+        # 3. 近 5 日連漲
         recent = close.iloc[-5:]
         if all(recent.iloc[i] < recent.iloc[i+1] for i in range(len(recent)-1)):
             reasons.append("近 5 日連續收紅，逢高減碼機會")
+
+        # 4. v2 新增：價格從 AVWAP 以下回升至 AVWAP 附近（折價→均價）
+        if avwap > 0 and len(close) >= 6:
+            price_5ago = float(close.iloc[-6])
+            if price_5ago < avwap * 0.97 and price_now >= avwap * 0.97:
+                reasons.append(f"價格回升至 AVWAP 附近（NT${round(avwap, 1)}），反彈確認")
 
         return len(reasons) > 0, reasons
     except Exception:
@@ -100,7 +113,7 @@ def get_sell_advice(holding_result: dict, cfg: dict) -> dict:
     # 拉技術信號
     try:
         df = fetch_data(symbol, period="6mo")
-        sig = calc_signals(df, cfg) if not df.empty else {}
+        sig = calc_signals(df, cfg, symbol=symbol) if not df.empty else {}
     except Exception:
         sig = {}
 

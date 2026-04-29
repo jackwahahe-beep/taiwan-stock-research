@@ -51,7 +51,33 @@ def _portfolio_symbols(cfg: dict) -> set[str]:
 
 # ── 買入推播 ────────────────────────────────────────────────────────────────────
 
-def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None) -> dict:
+def _dca_context_line(symbol: str, dca_cache: dict) -> str | None:
+    """從 DCA 快取取出建議策略的 10 年 CAGR / MDD，供 embed 顯示。"""
+    try:
+        from tw_backtest_dca import RECOMMENDED_DCA
+        r = dca_cache.get(symbol)
+        if not r:
+            return None
+        rec_label = RECOMMENDED_DCA.get(symbol)
+        if not rec_label:
+            return None
+        for s in r.get("strategies", []):
+            if s["label"] == rec_label:
+                total = s.get("total_return_pct")
+                cagr  = s.get("cagr_pct")
+                mdd   = s.get("max_drawdown_pct")
+                parts = [f"**{rec_label}**"]
+                if total is not None: parts.append(f"10年報酬 `{total}%`")
+                if cagr  is not None: parts.append(f"CAGR `{cagr}%`")
+                if mdd   is not None: parts.append(f"MDD `{mdd}%`")
+                return "⭐ " + "  ".join(parts)
+    except Exception:
+        pass
+    return None
+
+
+def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None,
+                    dca_cache: dict | None = None) -> dict:
     budget   = cfg.get("trade_budget", 100000)
     price    = stock["price"]
     avwap    = stock.get("avwap", 0)
@@ -94,19 +120,34 @@ def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None) -> d
                         "value": "大盤趨勢向下，此信號為 STRONG BUY 才推播，嚴控倉位",
                         "inline": False})
 
-    # 回測佐證
+    # 回測佐證（v2 BUY / STRONG BUY 策略）
     if bt_summary:
-        rsi_bt = next((s for s in bt_summary.get("strategies", []) if "RSI" in s["label"]), None)
-        if rsi_bt and rsi_bt["trades"] > 0:
-            wr  = rsi_bt["win_rate"]
-            tr  = rsi_bt["total_return_pct"]
-            bnh = bt_summary.get("bnh_return_pct", 0)
-            beat = "✅ 優於B&H" if tr > bnh else "⚠️ 低於B&H"
+        strats = bt_summary.get("strategies", [])
+        bnh    = bt_summary.get("bnh_return_pct", 0)
+        bt_lines = []
+        for s in strats:
+            if s.get("trades", 0) == 0:
+                continue
+            wr    = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
+            mdd   = f"{s['max_drawdown_pct']}%" if s.get("max_drawdown_pct") is not None else "N/A"
+            beat  = "✅" if s["total_return_pct"] > bnh else "⚠️"
+            label = s["label"].replace("v2 ", "").replace("策略", "")
+            bt_lines.append(
+                f"{beat} **{label}** 報酬 `{s['total_return_pct']}%`  "
+                f"勝率 `{wr}`  交易 `{s['trades']}次`  MDD `{mdd}`"
+            )
+        if bt_lines:
+            bt_lines.append(f"📌 B&H 基準 `{bnh}%`（2年）")
             fields.append({
-                "name":  "📊 歷史回測（RSI策略，2年）",
-                "value": f"總報酬 `{tr}%`　勝率 `{wr}%`　交易 `{rsi_bt['trades']}` 次　{beat}",
+                "name":  "📊 歷史回測（v2，2年）",
+                "value": "\n".join(bt_lines),
                 "inline": False,
             })
+
+    # 10 年 DCA 建議策略
+    dca_line = _dca_context_line(stock["symbol"], dca_cache or {})
+    if dca_line:
+        fields.append({"name": "📈 10年DCA建議策略", "value": dca_line, "inline": False})
 
     if watch_reasons:
         fields.append({"name": "⚠️ 附加注意",
@@ -121,24 +162,86 @@ def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None) -> d
     }
 
 
-# ── 賣出推播（持股掃描觸發）────────────────────────────────────────────────────
+# ── 賣出推播 ───────────────────────────────────────────────────────────────────
 
-def build_sell_embed(stock: dict) -> dict:
+def build_sell_embed(stock: dict, cfg: dict, bt_summary: dict | None = None,
+                     dca_cache: dict | None = None, in_portfolio: bool = False) -> dict:
+    from tw_screener import SIGNAL_CONFIG, _DEFAULT_CFG
+
+    sym        = stock["symbol"]
+    price      = stock["price"]
+    avwap      = stock.get("avwap", 0)
+    rsi        = stock["rsi"]
+    dd_pct     = stock.get("dd_pct", 0)
+    budget     = cfg.get("trade_budget", 100_000)
+    stock_cfg  = SIGNAL_CONFIG.get(sym, _DEFAULT_CFG)
+
     sell_reasons = [s["reason"] for s in stock["signals"] if s["type"] in ("SELL", "WATCH")]
     reasons_text = "\n".join(f"• {r}" for r in sell_reasons)
-    avwap = stock.get("avwap", 0)
+
+    # 策略目標出場區（AVWAP × s）
+    s_target     = round(avwap * stock_cfg["s"], 1) if avwap > 0 else 0
+    above_target = round((price / s_target - 1) * 100, 1) if s_target > 0 else 0
+    avwap_dist   = f"{((price / avwap - 1) * 100):+.1f}%" if avwap > 0 else "N/A"
+
+    # 建議出場（以 trade_budget 倉位估算）
+    suggested_shares  = int(budget // price)
+    suggested_proceed = int(suggested_shares * price)
+
+    title_prefix = "🔴 賣出信號（持股）" if in_portfolio else "🔴 賣出信號（觀察）"
+
+    fields = [
+        {"name": "現價",           "value": f"`NT${price}`",    "inline": True},
+        {"name": "RSI",            "value": f"`{rsi}`",          "inline": True},
+        {"name": "DD / AVWAP距離", "value": f"`{dd_pct}%` / `{avwap_dist}`", "inline": True},
+        {"name": "📌 策略目標出場",
+         "value": (
+             f"目標區 `NT${s_target}`（AVWAP `{avwap}` × {stock_cfg['s']}）\n"
+             f"現價已超過目標 `+{above_target}%`"
+         ),
+         "inline": False},
+        {"name": "觸發信號", "value": reasons_text, "inline": False},
+        {"name": "📌 建議出場（以 NT$100k 倉位估算）",
+         "value": (
+             f"賣出 `{suggested_shares}` 股 @ `NT${price}`\n"
+             f"估回收 `NT${suggested_proceed:,}`"
+         ),
+         "inline": False},
+    ]
+
+    # 回測佐証
+    if bt_summary:
+        strats   = bt_summary.get("strategies", [])
+        bnh      = bt_summary.get("bnh_return_pct", 0)
+        bt_lines = []
+        for s in strats:
+            if s.get("trades", 0) == 0:
+                continue
+            wr    = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
+            mdd   = f"{s['max_drawdown_pct']}%" if s.get("max_drawdown_pct") is not None else "N/A"
+            beat  = "✅" if s["total_return_pct"] > bnh else "⚠️"
+            label = s["label"].replace("v2 ", "").replace("策略", "")
+            bt_lines.append(
+                f"{beat} **{label}** 報酬 `{s['total_return_pct']}%`  "
+                f"勝率 `{wr}`  交易 `{s['trades']}次`  MDD `{mdd}`"
+            )
+        if bt_lines:
+            bt_lines.append(f"📌 B&H 基準 `{bnh}%`（2年）")
+            fields.append({
+                "name":  "📊 歷史回測（v2，2年）",
+                "value": "\n".join(bt_lines),
+                "inline": False,
+            })
+
+    # 10 年 DCA 建議策略
+    dca_line = _dca_context_line(sym, dca_cache or {})
+    if dca_line:
+        fields.append({"name": "📈 10年DCA建議策略", "value": dca_line, "inline": False})
 
     return {
-        "color": COLOR["SELL"],
-        "title": f"🔴 賣出信號｜{stock['symbol'].replace('.TW','')} {stock['name']}",
-        "fields": [
-            {"name": "現價",          "value": f"`NT${stock['price']}`", "inline": True},
-            {"name": "RSI",           "value": f"`{stock['rsi']}`",      "inline": True},
-            {"name": "DD / AVWAP距離",
-             "value": f"`{stock.get('dd_pct',0)}%` / `{((stock['price']/avwap-1)*100):+.1f}%`" if avwap > 0 else "N/A",
-             "inline": True},
-            {"name": "觸發信號",      "value": reasons_text,             "inline": False},
-        ],
+        "color":  COLOR["SELL"],
+        "title":  f"{title_prefix}｜{sym.replace('.TW','')} {stock['name']}",
+        "fields": fields,
         "footer": {"text": f"AVWAP NT${avwap}　{datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}"},
     }
 
@@ -148,15 +251,24 @@ def build_sell_embed(stock: dict) -> dict:
 def build_market_mode_embed(results: list[dict]) -> dict | None:
     if not results:
         return None
-    mode   = results[0].get("market_mode", "NORMAL")
+    from tw_screener import get_market_mode
+    mode, detail = get_market_mode()
     label  = MODE_LABEL.get(mode, "🟢 正常")
     color  = COLOR.get(mode, COLOR["INFO"]) if mode != "NORMAL" else COLOR["INFO"]
+
+    twii_price = detail.get("twii_price", "N/A")
+    twii_ma200 = detail.get("twii_ma200", "N/A")
+    vs_pct     = detail.get("twii_vs_ma200_pct", "N/A")
+    vol_20     = detail.get("vol_20_annualized", "N/A")
 
     strong_buys = [r for r in results if any(s["type"] == "STRONG BUY" for s in r.get("signals", []))]
     buys        = [r for r in results if any(s["type"] == "BUY"         for s in r.get("signals", []))]
     sells       = [r for r in results if any(s["type"] == "SELL"        for s in r.get("signals", []))]
 
-    lines = [f"市場模式：**{label}**\n"]
+    lines = [
+        f"市場模式：**{label}**",
+        f"TWII `{twii_price}` vs MA200 `{twii_ma200}` （`{vs_pct:+.2f}%`）　波動率 `{vol_20}%`\n",
+    ]
     if strong_buys:
         lines.append("🟢🟢 強力買入：" + "、".join(r["symbol"].replace(".TW","") for r in strong_buys))
     if buys:
@@ -166,6 +278,27 @@ def build_market_mode_embed(results: list[dict]) -> dict | None:
     if not strong_buys and not buys and not sells:
         lines.append("今日無明確買入/賣出信號")
 
+    # 近信號預警（距試買觸發 < 5%，提醒準備預算）
+    try:
+        from tw_screener import SIGNAL_CONFIG, _DEFAULT_CFG
+        near = []
+        for r in results:
+            if any(s["type"] in ("BUY", "STRONG BUY") for s in r.get("signals", [])):
+                continue  # 已觸發，不算近
+            avwap = r.get("avwap", 0)
+            price = r.get("price", 0)
+            if not avwap or not price:
+                continue
+            scfg = SIGNAL_CONFIG.get(r["symbol"], _DEFAULT_CFG)
+            b1   = avwap * scfg["b1"]
+            dist = (price - b1) / b1 * 100
+            if 0 < dist < 5:
+                near.append(f"{r['symbol'].replace('.TW','')} 距試買 `+{dist:.1f}%`")
+        if near:
+            lines.append("\n📍 準備預算（距試買觸發 < 5%）：" + "、".join(near))
+    except Exception:
+        pass
+
     return {
         "color":       color,
         "title":       f"📊 台股每日掃描｜{datetime.now(TZ).strftime('%Y-%m-%d')}",
@@ -174,13 +307,64 @@ def build_market_mode_embed(results: list[dict]) -> dict | None:
     }
 
 
+# ── 事後驗證推播 ───────────────────────────────────────────────────────────────
+
+def build_outcome_embed(outcome: dict) -> dict | None:
+    """將 tw_outcome.grade_date() 結果格式化為 Discord embed。"""
+    summary = outcome.get("summary", {})
+    total   = summary.get("total", 0)
+    if total == 0:
+        return None
+
+    correct = summary.get("correct", 0)
+    acc     = summary.get("accuracy")
+    date    = outcome.get("date", "")
+    look    = outcome.get("look_ahead", 5)
+    acc_str = f"{acc:.0%}" if acc is not None else "N/A"
+
+    color = (COLOR["BUY"] if (acc or 0) >= 0.6
+             else COLOR["WARN"] if (acc or 0) >= 0.4
+             else COLOR["SELL"])
+
+    lines = []
+    for sym, r in outcome.get("stock_results", {}).items():
+        icon    = "✅" if r.get("correct") else ("❌" if r.get("correct") is False else "—")
+        pct     = r.get("actual_pct")
+        pct_str = f"{pct:+.2f}%" if pct is not None else "N/A"
+        lines.append(
+            f"{icon} **{sym.replace('.TW','')} {r['name']}**　"
+            f"{r['signal']} → {pct_str}（{look}日後）"
+        )
+
+    return {
+        "color":       color,
+        "title":       f"🎯 信號驗證｜{date}（{look}日後對答）",
+        "description": "\n".join(lines),
+        "fields": [
+            {"name": "正確率", "value": f"`{correct}/{total}` ({acc_str})", "inline": True},
+            {"name": "門檻",
+             "value": f"買入 ≥+0.5%　賣出 ≤-0.5%", "inline": True},
+        ],
+        "footer": {"text": f"評分於 {outcome.get('graded_at', '')}"},
+    }
+
+
 # ── 主推播函數 ────────────────────────────────────────────────────────────────
 
-def send_scan_results(results: list[dict], bt_cache: dict | None = None) -> None:
+def send_scan_results(results: list[dict], bt_cache: dict | None = None,
+                      dca_cache: dict | None = None) -> None:
     cfg         = load_config()
     webhook_url = cfg["discord"]["webhook_url"]
     portfolio_syms = _portfolio_symbols(cfg)
     market_mode = results[0].get("market_mode", "NORMAL") if results else "NORMAL"
+
+    # 載入 DCA 快取（若未傳入）
+    if dca_cache is None:
+        try:
+            from tw_backtest_dca import load_dca_cache
+            dca_cache = load_dca_cache()
+        except Exception:
+            dca_cache = {}
 
     buy_embeds  = []
     sell_embeds = []
@@ -197,11 +381,13 @@ def send_scan_results(results: list[dict], bt_cache: dict | None = None) -> None
             if market_mode == "RISK" and "STRONG BUY" not in types:
                 continue
             bt = (bt_cache or {}).get(r["symbol"])
-            buy_embeds.append(build_buy_embed(r, cfg, bt))
+            buy_embeds.append(build_buy_embed(r, cfg, bt, dca_cache=dca_cache))
 
-        # 賣出推播（持股）
-        if in_portfolio and "SELL" in types:
-            sell_embeds.append(build_sell_embed(r))
+        # 賣出推播（持股 + 非持股觀察）
+        if "SELL" in types:
+            bt = (bt_cache or {}).get(r["symbol"])
+            sell_embeds.append(build_sell_embed(r, cfg, bt, dca_cache=dca_cache,
+                                                in_portfolio=in_portfolio))
 
     # 先發市場模式 header
     header = build_market_mode_embed(results)
@@ -214,7 +400,7 @@ def send_scan_results(results: list[dict], bt_cache: dict | None = None) -> None
 
     for i in range(0, len(sell_embeds), 10):
         ok = send_webhook({"embeds": sell_embeds[i:i+10]}, webhook_url)
-        print(f"[Discord] 持股賣出推播 {len(sell_embeds[i:i+10])} 個 — {'成功' if ok else '失敗'}")
+        print(f"[Discord] 賣出推播 {len(sell_embeds[i:i+10])} 個 — {'成功' if ok else '失敗'}")
 
     if not buy_embeds and not sell_embeds:
         # 補充市場溫度
@@ -236,6 +422,127 @@ def send_scan_results(results: list[dict], bt_cache: dict | None = None) -> None
         }]}
         send_webhook(payload, webhook_url)
         print("[Discord] 每日摘要推播")
+
+
+# ── 週報摘要 ──────────────────────────────────────────────────────────────────
+
+def build_weekly_embed(cache_dir: Path, days: int = 7) -> dict | None:
+    """
+    讀取過去 N 天的 scan cache，統計各股信號次數與市場模式分布。
+    回傳 Discord embed dict，無快取則回傳 None。
+    """
+    import glob as _glob
+    import json
+    from datetime import date, timedelta
+
+    today  = date.today()
+    cutoff = today - timedelta(days=days)
+
+    files = sorted(_glob.glob(str(cache_dir / "scan_*.json")), reverse=True)
+    daily: list[list[dict]] = []
+    for f in files:
+        fname_date = Path(f).stem.replace("scan_", "")
+        try:
+            d = date.fromisoformat(fname_date)
+        except ValueError:
+            continue
+        if d < cutoff:
+            break
+        daily.append(json.loads(Path(f).read_text(encoding="utf-8")))
+
+    if not daily:
+        return None
+
+    # 市場模式分布
+    mode_count: dict[str, int] = {"NORMAL": 0, "WARN": 0, "RISK": 0}
+    # 每股信號累計
+    signal_tally: dict[str, dict[str, int]] = {}
+
+    for day_records in daily:
+        # 市場模式：每天只計一次（取第一筆）
+        if day_records:
+            day_mode = day_records[0].get("market_mode", "NORMAL")
+            if day_mode in mode_count:
+                mode_count[day_mode] += 1
+
+        for r in day_records:
+            sym = r["symbol"]
+            if sym not in signal_tally:
+                signal_tally[sym] = {"name": r.get("name", sym),
+                                     "STRONG BUY": 0, "BUY": 0, "SELL": 0}
+            for s in r.get("signals", []):
+                t = s.get("type", "")
+                if t in signal_tally[sym]:
+                    signal_tally[sym][t] += 1
+
+    actual_days = len(daily)
+    mode_line = (
+        f"NORMAL `{mode_count['NORMAL']}天`　"
+        f"WARN `{mode_count['WARN']}天`　"
+        f"RISK `{mode_count['RISK']}天`"
+    )
+
+    # 有信號的股票排序：STRONG BUY > BUY > SELL
+    active = {
+        sym: v for sym, v in signal_tally.items()
+        if v["STRONG BUY"] + v["BUY"] + v["SELL"] > 0
+    }
+    sorted_syms = sorted(
+        active,
+        key=lambda s: (active[s]["STRONG BUY"], active[s]["BUY"], -active[s]["SELL"]),
+        reverse=True,
+    )
+
+    lines = []
+    for sym in sorted_syms:
+        v    = active[sym]
+        name = v["name"]
+        parts = []
+        if v["STRONG BUY"]:
+            parts.append(f"🟢🟢×{v['STRONG BUY']}")
+        if v["BUY"]:
+            parts.append(f"🟢×{v['BUY']}")
+        if v["SELL"]:
+            parts.append(f"🔴×{v['SELL']}")
+        lines.append(f"**{sym.replace('.TW','')} {name}** — {' '.join(parts)}")
+
+    if not lines:
+        lines.append("本週無明確買入/賣出信號")
+
+    # 信號正確率（近 30 日 outcome）
+    _LOOK_AHEAD = 5   # 與 tw_outcome.LOOK_AHEAD 一致
+    accuracy_fields = []
+    try:
+        from tw_outcome import compute_rolling_accuracy
+        stats = compute_rolling_accuracy(30)
+        if stats and stats.get("days", 0) > 0:
+            acc_parts = []
+            for sig, v in stats["signals"].items():
+                if v["total"] == 0:
+                    continue
+                acc_str = f"{v['accuracy']:.0%}" if v["accuracy"] is not None else "N/A"
+                avg_str = f"{v['avg_pct']:+.2f}%" if v["avg_pct"] is not None else "N/A"
+                label   = sig.replace("STRONG BUY", "強買").replace("BUY", "買入").replace("SELL", "賣出")
+                acc_parts.append(f"**{label}** `{v['correct']}/{v['total']}` 正確率 `{acc_str}` 平均報酬 `{avg_str}`")
+            if acc_parts:
+                accuracy_fields.append({
+                    "name":  f"🎯 信號正確率（近 {stats['days']} 日，{_LOOK_AHEAD}日後驗證）",
+                    "value": "\n".join(acc_parts),
+                    "inline": False,
+                })
+    except Exception:
+        pass
+
+    return {
+        "color":       COLOR["INFO"],
+        "title":       f"📋 台股週報｜{(today - timedelta(days=actual_days-1)).isoformat()} ～ {today.isoformat()}",
+        "description": "\n".join(lines),
+        "fields": [
+            {"name": "市場模式分布", "value": mode_line, "inline": False},
+            {"name": "統計天數",     "value": f"{actual_days} 個交易日",   "inline": True},
+        ] + accuracy_fields,
+        "footer": {"text": f"每週五自動發送　{datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}"},
+    }
 
 
 if __name__ == "__main__":

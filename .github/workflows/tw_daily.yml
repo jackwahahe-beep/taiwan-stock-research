@@ -1,0 +1,43 @@
+name: 台股每日掃描
+
+on:
+  schedule:
+    - cron: '45 0 * * 1-5'  # 盤前 08:45 台灣時間 (UTC+8 → 00:45 UTC)
+    - cron: '0 6 * * 1-5'   # 盤後 14:00 台灣時間 (UTC+8 → 06:00 UTC)
+  workflow_dispatch:          # 手動觸發（測試用）
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 還原回測快取
+        uses: actions/cache@v4
+        with:
+          path: cache/
+          key: tw-cache-${{ github.run_id }}
+          restore-keys: |
+            tw-cache-
+
+      - name: 執行掃描
+        run: |
+          HOUR=$(date -u +%H)
+          if [ "$HOUR" -eq "0" ]; then
+            echo "盤前掃描（使用快取回測）"
+            python tw_scheduler.py
+          else
+            echo "盤後掃描（重跑 2 年信號回測）"
+            python tw_scheduler.py --backtest
+          fi
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

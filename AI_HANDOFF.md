@@ -1,7 +1,15 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-04-29（Session 2 計畫中）
+> 上次更新：2026-04-29（Session 3 進行中）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
+
+---
+
+## 鐵則（AI 操作規範）
+
+- **Edit / Read / Bash / Write 直接執行**，不需詢問用戶確認，自行選擇最優解
+- 只有高風險操作（刪除重要資料、force push、外部服務操作）才暫停詢問
+- 每次 Session 開始前先更新此文件再動手改程式碼
 
 ---
 
@@ -95,7 +103,19 @@ python tw_scheduler.py --daemon
 
 ---
 
-## Session 2 計畫（進行中，2026-04-29）
+## Session 3 計畫（進行中，2026-04-29）
+
+### 推播邏輯重構 + 新標的
+1. **買入推播升級**：非持股 BUY 信號 → 推播建議股數（基於 `trade_budget`）+ 回測勝率確認
+2. **持股推播改條件觸發**：HOLD 靜默；EXIT（如友達）等反彈信號才推；SELL_STRONG 才主動通知
+3. **新熱門標的加入追蹤清單**：AI伺服器、電源、高息ETF
+4. `config.yaml` 新增 `trade_budget`（每筆建議投入金額）
+
+實作文件異動：`config.yaml`, `tw_discord.py`, `tw_portfolio.py`, `tw_backtest.py`, `tw_scheduler.py`
+
+---
+
+## Session 2 計畫（已完成，2026-04-29）
 
 ### 新功能：持股追蹤 + 賣出提示
 用戶持股：

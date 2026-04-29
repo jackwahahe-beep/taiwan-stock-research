@@ -9,6 +9,10 @@ watchlist:
       name: "富邦台50"
     - symbol: "00713.TW"
       name: "元大台灣高息低波"
+    - symbol: "00929.TW"
+      name: "復華台灣科技優息"    # 科技高息，近期熱門
+    - symbol: "00919.TW"
+      name: "群益台灣精選高息"    # 高息輪動型
   ai_tech:
     - symbol: "2330.TW"
       name: "台積電"
@@ -20,6 +24,14 @@ watchlist:
       name: "聯華電子"
     - symbol: "6770.TW"
       name: "力積電"
+    - symbol: "2382.TW"
+      name: "廣達"               # AI伺服器最大受益者
+    - symbol: "2308.TW"
+      name: "台達電"             # 電源/散熱，AI需求爆發
+    - symbol: "3037.TW"
+      name: "欣興"               # CoWoS ABF載板
+    - symbol: "2408.TW"
+      name: "南亞科"             # DRAM，HBM題材
 
 # 信號參數
 signals:
@@ -32,10 +44,13 @@ signals:
     slow: 60
   volume_spike: 1.5    # 成交量為 20 日均量的倍數
 
-# Discord Webhook（執行前填入你的 URL）
+# 買入建議預算（每筆建議投入金額，NT$）
+trade_budget: 100000
+
+# Discord Webhook
 discord:
   webhook_url: "${DISCORD_WEBHOOK_URL}"
-  mention_role: ""     # 可選，填 Discord role ID 例如 "<@&123456>"
+  mention_role: ""
 
 # 個人持股（用於 P&L 追蹤與賣出提示）
 portfolio:
@@ -57,8 +72,6 @@ portfolio:
 
 # 排程
 schedule:
-  # 台股盤前掃描（09:00 開盤，08:45 掃描）
   pre_market: "08:45"
-  # 盤後收盤結算（13:30 收盤，14:00 結算）
   post_market: "14:00"
   timezone: "Asia/Taipei"

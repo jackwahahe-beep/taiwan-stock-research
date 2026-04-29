@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -T git@github.com)",
+      "Bash(curl -s -I *)",
+      "Bash(curl -s -H * https://api.github.com/user)",
+      "Bash(git -C * remote *)",
+      "Bash(git -C * log *)",
+      "Bash(git -C * status)",
+      "Bash(git -C * diff *)",
+      "Bash(git -C * branch *)"
+    ],
+    "deny": []
+  }
+}

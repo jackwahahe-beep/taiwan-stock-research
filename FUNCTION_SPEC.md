@@ -329,6 +329,61 @@ schedule:
 
 ---
 
+## tw_portfolio.py — 持股追蹤（Session 2 新增）
+
+### `fetch_latest_price(symbol) → float | None`
+從 `fetch_data` 拉取最新收盤價，自動 dropna 取最後有效值。
+
+### `calc_holding(holding, price) → dict`
+計算單筆持股的即時 P&L。成本為 0（配股）時 `pnl_pct` 回傳 `None`。
+
+### `_detect_bounce(symbol, cfg) → (bool, list[str])`
+偵測「待機賣出」股票的反彈信號（私有函數）。
+條件：RSI 由超賣區（<30）回升 > 40、MA5 黃金交叉 MA20、或近 5 日連漲。
+
+### `get_sell_advice(holding_result, cfg) → dict`
+決定持股操作建議與是否推播（`push: bool`）：
+
+| action | push | 條件 |
+|--------|------|------|
+| `SELL_STRONG` | ✅ | SELL信號 + 獲利 > 5% |
+| `EXIT_BOUNCE` | ✅ | 待機賣出 + 反彈偵測觸發 |
+| `SELL_WATCH` | ✅ | SELL信號 + 虧損 > 10% |
+| `SELL_MONITOR` | ❌ | SELL信號但損益介於 -10% ~ +5% |
+| `EXIT_WAIT` | ❌ | 待機賣出，無反彈信號 |
+| `HOLD` | ❌ | 無任何賣出信號 |
+| `WATCH` | ❌ | 僅爆量信號 |
+
+### `run_portfolio_check() → list[dict]`
+批次處理所有持股，回傳含 `advice` 的結果 list。
+
+### `build_portfolio_embeds(results) → list[dict]`
+產生持股 Discord embed。永遠包含「總覽」卡片，再附加有 `push=True` 的個別操作卡片。
+
+---
+
+## tw_discord.py — 推播分流（Session 3 重構）
+
+### `send_scan_results(results, bt_cache=None) → None`
+三分流推播：
+1. **非持股 + BUY** → `build_buy_embed`（含建議股數 + 回測佐證）
+2. **持股 + SELL** → `build_sell_embed`
+3. **都無** → 每日摘要（含市場溫度：偏熱 / 中性 / 偏冷 + 中性觀察清單）
+
+### `build_buy_embed(stock, cfg, bt_summary=None) → dict`
+買入信號 embed 欄位：現價 / RSI / MA / 建議股數 / 預估成本 / 回測勝率（若有快取）。
+建議股數 = `trade_budget // price`。
+
+---
+
+## tw_backtest.py — 新增函數
+
+### `load_backtest_cache() → dict`
+讀取最新 `cache/backtest_*.json`，回傳 `{symbol: bt_result}` dict。
+供 `send_scan_results` 在買入推播中附加歷史績效，不重新執行回測。
+
+---
+
 ## 已知限制與待實作項目
 
 | 項目 | 說明 | 難度 |

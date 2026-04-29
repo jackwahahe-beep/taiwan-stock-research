@@ -189,6 +189,16 @@ def build_backtest_embed(bt: dict) -> dict:
     }
 
 
+def load_backtest_cache() -> dict:
+    """讀取最新回測快取，回傳 {symbol: bt_result} 供買入推播使用"""
+    import glob as _glob
+    files = sorted(_glob.glob(str(CACHE_DIR / "backtest_*.json")), reverse=True)
+    if not files:
+        return {}
+    data = json.loads(Path(files[0]).read_text(encoding="utf-8"))
+    return {r["symbol"]: r for r in data}
+
+
 if __name__ == "__main__":
     print("=== 台股策略回測 ===\n")
     results = run_backtest_all()

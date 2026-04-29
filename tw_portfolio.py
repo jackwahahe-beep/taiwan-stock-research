@@ -1,12 +1,10 @@
 """
 持股追蹤模組
-- 讀取 config.yaml portfolio 區塊
-- 拉取即時收盤價，計算每筆持股 P&L
-- 疊加技術信號，給出賣出 / 持有建議
-- 產生 Discord embed
+- HOLD → 靜默（不推播）
+- EXIT（待機賣出）→ 偵測反彈條件才推播
+- SELL_STRONG / SELL_WATCH → 立即推播
 """
 
-import yfinance as yf
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +32,6 @@ def calc_holding(holding: dict, price: float) -> dict:
         pnl = round((price - cost) * shares, 0)
         pnl_pct = round((price - cost) / cost * 100, 2)
     else:
-        # 成本為 0（配股）：以市值全算獲利
         pnl = market_value
         pnl_pct = None
 
@@ -51,21 +48,54 @@ def calc_holding(holding: dict, price: float) -> dict:
     }
 
 
+def _detect_bounce(symbol: str, cfg: dict) -> tuple[bool, list[str]]:
+    """
+    偵測反彈信號，用於「待機賣出」股票。
+    回傳 (is_bounce, reasons)
+    條件：RSI 由超賣區（<30）回升超過 40，或短期均線由下彎轉上
+    """
+    try:
+        df = fetch_data(symbol, period="6mo")
+        if df.empty or len(df) < 20:
+            return False, []
+        close = df["Close"].dropna()
+        rsi = calc_rsi(close)
+        ma5 = close.rolling(5).mean()
+        ma20 = close.rolling(20).mean()
+
+        reasons = []
+
+        # RSI 從超賣反彈回 40 以上
+        rsi_prev = rsi.iloc[-6:-1]
+        rsi_now = rsi.iloc[-1]
+        if any(v < 30 for v in rsi_prev) and rsi_now > 40:
+            reasons.append(f"RSI 由超賣區反彈至 {round(rsi_now, 1)}，短線回升機會")
+
+        # MA5 由下穿 MA20 後回穿（黃金交叉短期版）
+        if (ma5.iloc[-2] <= ma20.iloc[-2]) and (ma5.iloc[-1] > ma20.iloc[-1]):
+            reasons.append("MA5 黃金交叉 MA20，短線動能回升")
+
+        # 近 5 日連漲
+        recent = close.iloc[-5:]
+        if all(recent.iloc[i] < recent.iloc[i+1] for i in range(len(recent)-1)):
+            reasons.append("近 5 日連續收紅，逢高減碼機會")
+
+        return len(reasons) > 0, reasons
+    except Exception:
+        return False, []
+
+
 def get_sell_advice(holding_result: dict, cfg: dict) -> dict:
-    """
-    疊加技術信號，回傳建議動作與原因。
-    - SELL_STRONG：技術信號 + 已有利潤，強烈建議賣出
-    - SELL_WATCH：技術信號但虧損中，注意停損
-    - HOLD：無明確賣出信號
-    - EXIT：持股備注為「待機賣出」，等反彈賣出
-    """
     symbol = holding_result["symbol"]
     note = holding_result["note"]
     pnl_pct = holding_result["pnl_pct"]
 
-    # 標記為待機賣出
+    # 待機賣出：只在偵測到反彈時才推播
     if "待機賣出" in note:
-        return {"action": "EXIT", "reasons": ["持股標記為待機賣出，逢反彈出場"]}
+        is_bounce, bounce_reasons = _detect_bounce(symbol, cfg)
+        if is_bounce:
+            return {"action": "EXIT_BOUNCE", "reasons": bounce_reasons, "push": True}
+        return {"action": "EXIT_WAIT", "reasons": ["等待反彈機會，目前無明確出場信號"], "push": False}
 
     # 拉技術信號
     try:
@@ -76,20 +106,21 @@ def get_sell_advice(holding_result: dict, cfg: dict) -> dict:
 
     sell_signals = [s for s in sig.get("signals", []) if s["type"] == "SELL"]
     watch_signals = [s for s in sig.get("signals", []) if s["type"] == "WATCH"]
-
     reasons = [s["reason"] for s in sell_signals]
 
     if sell_signals:
-        if pnl_pct is not None and pnl_pct > 0:
-            return {"action": "SELL_STRONG", "reasons": reasons, "signals": sig}
+        if pnl_pct is not None and pnl_pct > 5:
+            return {"action": "SELL_STRONG", "reasons": reasons, "signals": sig, "push": True}
+        elif pnl_pct is not None and pnl_pct < -10:
+            reasons.append(f"虧損 {pnl_pct}%，技術面轉弱，考慮停損")
+            return {"action": "SELL_WATCH", "reasons": reasons, "signals": sig, "push": True}
         else:
-            reasons.append(f"目前虧損 {pnl_pct}%，技術面轉弱，考慮停損")
-            return {"action": "SELL_WATCH", "reasons": reasons, "signals": sig}
+            return {"action": "SELL_MONITOR", "reasons": reasons, "signals": sig, "push": False}
 
     if watch_signals:
-        return {"action": "WATCH", "reasons": [s["reason"] for s in watch_signals], "signals": sig}
+        return {"action": "WATCH", "reasons": [s["reason"] for s in watch_signals], "signals": sig, "push": False}
 
-    return {"action": "HOLD", "reasons": ["無明確賣出信號"], "signals": sig}
+    return {"action": "HOLD", "reasons": [], "signals": sig, "push": False}
 
 
 def run_portfolio_check() -> list[dict]:
@@ -113,46 +144,49 @@ def run_portfolio_check() -> list[dict]:
 
         pnl_str = f"{result['pnl']:+,}"
         pct_str = f"{result['pnl_pct']:+.2f}%" if result["pnl_pct"] is not None else "配股"
-        print(f"    現價: {result['price']}  損益: {pnl_str} ({pct_str})  建議: {advice['action']}")
+        push_flag = "📢" if advice["push"] else "🔇"
+        print(f"    現價: {result['price']}  損益: {pnl_str} ({pct_str})  建議: {advice['action']} {push_flag}")
         results.append(result)
 
     return results
 
 
-# ── Discord embed ────────────────────────────────────────────────────────────────
+# ── Discord embeds ───────────────────────────────────────────────────────────────
 
 ACTION_COLOR = {
-    "SELL_STRONG": 0xE74C3C,   # 紅
-    "EXIT":        0xE67E22,   # 橘
-    "SELL_WATCH":  0xF39C12,   # 黃
-    "WATCH":       0xF1C40F,   # 淡黃
-    "HOLD":        0x2ECC71,   # 綠
+    "SELL_STRONG":  0xE74C3C,
+    "EXIT_BOUNCE":  0xE67E22,
+    "SELL_WATCH":   0xF39C12,
+    "SELL_MONITOR": 0xF1C40F,
+    "HOLD":         0x2ECC71,
+    "EXIT_WAIT":    0x95A5A6,
+    "WATCH":        0xF1C40F,
 }
 
 ACTION_LABEL = {
-    "SELL_STRONG": "🔴 建議賣出",
-    "EXIT":        "🟠 逢高出場",
-    "SELL_WATCH":  "🟡 注意停損",
-    "WATCH":       "🟡 觀察",
-    "HOLD":        "🟢 持有",
+    "SELL_STRONG":  "🔴 建議賣出（獲利出場）",
+    "EXIT_BOUNCE":  "🟠 反彈機會，逢高出場",
+    "SELL_WATCH":   "🟡 注意停損",
+    "SELL_MONITOR": "👀 技術轉弱，持續觀察",
+    "HOLD":         "🟢 續持",
+    "EXIT_WAIT":    "⏳ 待機賣出，等待中",
+    "WATCH":        "🟡 量能異常，注意",
 }
 
 
 def build_portfolio_embeds(results: list[dict]) -> list[dict]:
     embeds = []
 
-    # 首張：持股總覽
+    # 持股總覽
     total_pnl = sum(r["pnl"] for r in results)
     total_value = sum(r["market_value"] for r in results)
-    pnl_sign = "+" if total_pnl >= 0 else ""
     summary_lines = []
     for r in results:
         pct_str = f"{r['pnl_pct']:+.2f}%" if r["pnl_pct"] is not None else "配股"
-        action = ACTION_LABEL.get(r["advice"]["action"], "")
-        summary_lines.append(
-            f"**{r['symbol']} {r['name']}** — `NT${r['price']}` {pct_str}　{action}"
-        )
+        label = ACTION_LABEL.get(r["advice"]["action"], "")
+        summary_lines.append(f"**{r['symbol']} {r['name']}** `NT${r['price']}` {pct_str}　{label}")
 
+    pnl_sign = "+" if total_pnl >= 0 else ""
     embeds.append({
         "color": 0x3498DB,
         "title": f"💼 持股總覽｜{datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}",
@@ -163,19 +197,20 @@ def build_portfolio_embeds(results: list[dict]) -> list[dict]:
         ],
     })
 
-    # 每檔個別 embed（有操作建議才發）
+    # 個別 embed：只有 push=True 的才發
     for r in results:
-        action = r["advice"]["action"]
-        if action == "HOLD":
-            continue   # 無事就不多打擾
+        advice = r["advice"]
+        if not advice.get("push", False):
+            continue
 
+        action = advice["action"]
         color = ACTION_COLOR.get(action, 0x95A5A6)
         label = ACTION_LABEL.get(action, action)
-        reasons = "\n".join(f"• {x}" for x in r["advice"]["reasons"])
-        pct_str = f"{r['pnl_pct']:+.2f}%" if r["pnl_pct"] is not None else "配股成本"
+        reasons_text = "\n".join(f"• {x}" for x in advice["reasons"])
+        pct_str = f"{r['pnl_pct']:+.2f}%" if r["pnl_pct"] is not None else "配股"
 
-        sig = r["advice"].get("signals", {})
-        rsi_str = str(sig.get("rsi", "N/A"))
+        sig = advice.get("signals", {})
+        rsi_str = str(sig.get("rsi", "N/A")) if sig else "N/A"
 
         embeds.append({
             "color": color,
@@ -184,9 +219,9 @@ def build_portfolio_embeds(results: list[dict]) -> list[dict]:
                 {"name": "現價", "value": f"NT${r['price']}", "inline": True},
                 {"name": "持股損益", "value": f"NT${r['pnl']:+,}（{pct_str}）", "inline": True},
                 {"name": "RSI", "value": rsi_str, "inline": True},
-                {"name": "建議原因", "value": reasons, "inline": False},
+                {"name": "操作依據", "value": reasons_text, "inline": False},
             ],
-            "footer": {"text": f"成本均價 NT${r['cost']} × {r['shares']} 股"},
+            "footer": {"text": f"成本 NT${r['cost']} × {r['shares']} 股"},
         })
 
     return embeds
@@ -195,4 +230,5 @@ def build_portfolio_embeds(results: list[dict]) -> list[dict]:
 if __name__ == "__main__":
     print("=== 持股檢查 ===\n")
     results = run_portfolio_check()
-    print(f"\n完成，共 {len(results)} 筆持股")
+    actionable = [r for r in results if r["advice"].get("push")]
+    print(f"\n完成，共 {len(results)} 筆持股，{len(actionable)} 筆需操作")

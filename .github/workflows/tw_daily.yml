@@ -10,6 +10,8 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - uses: actions/checkout@v4
@@ -30,14 +32,6 @@ jobs:
             tw-cache-
 
       - name: 執行掃描
-        run: |
-          HOUR=$(date -u +%H)
-          if [ "$HOUR" -eq "0" ]; then
-            echo "盤前掃描（使用快取回測）"
-            python tw_scheduler.py
-          else
-            echo "盤後掃描（重跑 2 年信號回測）"
-            python tw_scheduler.py --backtest
-          fi
+        run: python tw_scheduler.py
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

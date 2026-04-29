@@ -1,9 +1,10 @@
 """
 台股排程執行器
 用法：
-  python tw_scheduler.py              # 立即執行一次（掃描 + 持股追蹤）
-  python tw_scheduler.py --backtest   # 掃描 + 持股追蹤 + 重新回測
-  python tw_scheduler.py --dca        # 執行 DCA 長期回測並推播
+  python tw_scheduler.py              # 立即執行一次（掃描 + 持股追蹤 + 事後驗證）
+  python tw_scheduler.py --backtest   # 同上 + 重新跑 2 年信號回測（手動用）
+  python tw_scheduler.py --dca        # 執行 10 年 DCA 回測並推播（手動 / 每週日）
+  python tw_scheduler.py --weekly     # 週報摘要推播
   python tw_scheduler.py --daemon     # 常駐排程
 """
 
@@ -12,7 +13,7 @@ import time
 import yaml
 import schedule
 import holidays
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -81,32 +82,29 @@ def run_once(run_backtest: bool = False):
     else:
         print(f"持股無操作信號，靜默（持有中）")
 
-    # 4. 事後驗證（盤後才跑，評分 LOOK_AHEAD 天前的信號）
-    if run_backtest:
-        try:
-            from tw_outcome import grade_date, LOOK_AHEAD
-            import holidays as _holidays
-            today_d   = datetime.now(TZ).date()
-            candidate = today_d - timedelta(days=1)
-            tw_hols   = _holidays.TW(years=candidate.year)
-            count = 0
-            while count < LOOK_AHEAD:
-                if candidate.weekday() < 5 and candidate not in tw_hols:
-                    count += 1
-                if count < LOOK_AHEAD:
-                    candidate -= timedelta(days=1)
-            print(f"\n--- 信號事後驗證（評分 {candidate.isoformat()}）---")
-            outcome = grade_date(candidate.isoformat())
-            if outcome:
-                from tw_discord import build_outcome_embed
-                embed = build_outcome_embed(outcome)
-                if embed:
-                    from tw_discord import send_webhook, load_config as discord_cfg
-                    cfg2 = discord_cfg()
-                    send_webhook({"embeds": [embed]}, cfg2["discord"]["webhook_url"])
-                    print("[Discord] 信號驗證推播")
-        except Exception as e:
-            print(f"    [!] 事後驗證失敗：{e}")
+    # 4. 事後驗證（每次盤後皆跑，快速操作，評分 LOOK_AHEAD 天前的信號）
+    try:
+        from tw_outcome import grade_date, LOOK_AHEAD
+        import holidays as _holidays
+        today_d   = datetime.now(TZ).date()
+        candidate = today_d - timedelta(days=1)
+        tw_hols   = _holidays.TW(years=candidate.year)
+        count = 0
+        while count < LOOK_AHEAD:
+            if candidate.weekday() < 5 and candidate not in tw_hols:
+                count += 1
+            if count < LOOK_AHEAD:
+                candidate -= timedelta(days=1)
+        print(f"\n--- 信號事後驗證（評分 {candidate.isoformat()}）---")
+        outcome = grade_date(candidate.isoformat())
+        if outcome:
+            from tw_discord import build_outcome_embed
+            embed = build_outcome_embed(outcome)
+            if embed:
+                send_webhook({"embeds": [embed]}, webhook_url)
+                print("[Discord] 信號驗證推播")
+    except Exception as e:
+        print(f"    [!] 事後驗證失敗：{e}")
 
     print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
 
@@ -116,13 +114,13 @@ def run_daemon():
     pre = cfg["schedule"]["pre_market"]
     post = cfg["schedule"]["post_market"]
 
-    schedule.every().day.at(pre).do(run_once, run_backtest=False)
-    schedule.every().day.at(post).do(run_once, run_backtest=True)
+    schedule.every().day.at(pre).do(run_once)
+    schedule.every().day.at(post).do(run_once)
     schedule.every().friday.at("17:00").do(run_weekly_report)
 
     print(f"排程常駐模式啟動")
-    print(f"  盤前 {pre}：掃描 + 持股追蹤（用快取回測）")
-    print(f"  盤後 {post}：掃描 + 持股追蹤 + 重新回測")
+    print(f"  盤前 {pre}：掃描 + 持股追蹤")
+    print(f"  盤後 {post}：掃描 + 持股追蹤 + 事後驗證")
     print(f"  每週五 17:00：週報摘要推播")
     print(f"  按 Ctrl+C 停止\n")
 

@@ -54,9 +54,14 @@ def calc_signals(df: pd.DataFrame, cfg: dict) -> dict:
     ma_slow = close.rolling(sig_cfg["ma"]["slow"]).mean()
     vol_ma20 = volume.rolling(20).mean()
 
+    price_val = close.iloc[-1]
+    rsi_val = rsi.iloc[-1]
+    if np.isnan(price_val) or np.isnan(rsi_val):
+        return {}
+
     latest = {
-        "price": round(close.iloc[-1], 2),
-        "rsi": round(rsi.iloc[-1], 1),
+        "price": round(price_val, 2),
+        "rsi": round(rsi_val, 1),
         "ma_fast": round(ma_fast.iloc[-1], 2),
         "ma_slow": round(ma_slow.iloc[-1], 2),
         "volume": int(volume.iloc[-1]),
@@ -102,14 +107,14 @@ def run_scan() -> list[dict]:
         print(f"  掃描 {symbol} {name}...")
 
         try:
-            df = fetch_data(symbol)
+            df = fetch_data(symbol, period="6mo")
             if df.empty:
                 print(f"    [!] 無資料，跳過")
                 continue
 
             sig = calc_signals(df, cfg)
             if not sig:
-                print(f"    [!] 資料不足，跳過")
+                print(f"    [!] 資料不足或無效，跳過")
                 continue
 
             entry = {

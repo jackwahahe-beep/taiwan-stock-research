@@ -1,26 +1,28 @@
 """
-台股長期定期定額（DCA）回測模組
-- 每年 1 月第一個交易日投入 NT$100,000
-- 4 策略比較：B&H DCA、RSI擇時 DCA、MA多頭過濾 DCA、組合策略 DCA
-- 最少 10 年資料（2015–2025）
-- 股災閃避分析：中國股災/貿易戰/COVID/升息熊市
-- 輸出 Discord embed 比較表
+台股長期定期定額（DCA）回測模組 v2
+與 tw_screener.py v2 策略完全一致（AVWAP + DD + 個股RSI閾值）
+策略：
+  1. B&H DCA        — 每年無條件投入
+  2. v2 BUY DCA     — DD>10% + 價格<AVWAP + RSI<個股閾值 才投入
+  3. v2 STRONG DCA  — DD>20% + 價格<AVWAP×b2 + RSI<超賣閾值 才投入
+  4. 市場模式 DCA   — 大盤 WARN/RISK 時加碼（逆向加碼）
 """
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import json
-from datetime import date, datetime
+import glob as _glob
+from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from tw_screener import calc_rsi, load_config
+from tw_screener import calc_rsi, load_config, SIGNAL_CONFIG, _DEFAULT_CFG
+from tw_backtest import calc_rolling_avwap, calc_rolling_dd, fetch_long
 
-BASE_DIR = Path(__file__).parent
-CACHE_DIR = BASE_DIR / "cache"
-TZ = ZoneInfo("Asia/Taipei")
-
-ANNUAL_BUDGET = 100_000        # 每年投入 NT$
+BASE_DIR      = Path(__file__).parent
+CACHE_DIR     = BASE_DIR / "cache"
+TZ            = ZoneInfo("Asia/Taipei")
+ANNUAL_BUDGET = 100_000
 START_YEAR    = 2015
 END_YEAR      = 2025
 
@@ -32,42 +34,51 @@ CRASH_PERIODS = [
 ]
 
 
-# ── 資料抓取 ────────────────────────────────────────────────────────────────────
+# ── 市場模式（歷史版，用 ^TWII）──────────────────────────────────────────────────
 
-def fetch_10y(symbol: str) -> pd.DataFrame:
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period="10y", auto_adjust=True)
-    if df.empty:
-        return df
-    df.index = df.index.tz_convert(TZ)
-    return df
+def _build_market_mode_series(twii_close: pd.Series, etf50_close: pd.Series) -> pd.Series:
+    """
+    與 tw_screener.get_market_mode 邏輯一致的歷史序列版本。
+    回傳每個交易日的 'NORMAL'/'WARN'/'RISK'。
+    """
+    ma200     = twii_close.rolling(200, min_periods=50).mean()
+    vs_ma200  = (twii_close - ma200) / ma200 * 100
 
+    log_ret   = np.log(etf50_close / etf50_close.shift(1))
+    vol_20    = log_ret.rolling(20).std() * np.sqrt(252) * 100
 
-# ── 信號輔助 ────────────────────────────────────────────────────────────────────
+    # 對齊到 TWII 的索引
+    vol_20 = vol_20.reindex(twii_close.index, method="ffill")
 
-def _rsi_oversold_filter(close: pd.Series, period: int = 14, oversold: int = 35) -> pd.Series:
-    """RSI < oversold 時允許買入（看漲擇時）"""
-    rsi = calc_rsi(close, period)
-    return rsi < oversold
+    modes = []
+    for v, vol in zip(vs_ma200, vol_20):
+        if np.isnan(v):
+            modes.append("NORMAL")
+        elif v < -5 or (v < 0 and (not np.isnan(vol) and vol > 25)):
+            modes.append("RISK")
+        elif v < 2 or (not np.isnan(vol) and vol > 30 and v < 10):
+            modes.append("WARN")
+        else:
+            modes.append("NORMAL")
 
-
-def _ma_bull_filter(close: pd.Series, fast: int = 20, slow: int = 60) -> pd.Series:
-    """MA fast > MA slow 時允許買入（多頭市場過濾）"""
-    return close.rolling(fast).mean() > close.rolling(slow).mean()
+    return pd.Series(modes, index=twii_close.index)
 
 
 # ── 核心 DCA 引擎 ───────────────────────────────────────────────────────────────
 
 def _run_dca(
     close: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    volume: pd.Series,
+    symbol: str,
     allow_buy: pd.Series | None = None,
     label: str = "DCA",
 ) -> dict:
     """
     通用 DCA 引擎。
-    - 每年 1 月第一個交易日嘗試投入 ANNUAL_BUDGET
-    - allow_buy: 布林 Series；None 表示無條件買入（B&H DCA）
-    - 若當天不允許買入，資金累積到下次允許日
+    allow_buy: 每日布林 Series；None → 無條件（B&H DCA）
+    若當日不允許，資金累積到下次允許日。
     """
     close = close.dropna()
     if close.empty:
@@ -80,26 +91,14 @@ def _run_dca(
         if not yr_data.empty:
             first_trading_days[yr] = yr_data.index[0]
 
-    cash_reserve = 0.0
-    shares = 0.0
+    cash_reserve   = 0.0
+    shares_held    = 0.0
     invested_total = 0.0
-    transactions = []
+    transactions   = []
+    pending_years  = set(first_trading_days.keys())
 
-    daily_index = close.index
-
-    for yr, inject_date in first_trading_days.items():
-        cash_reserve += ANNUAL_BUDGET
-
-    # 重算：按日遍歷
-    cash_reserve = 0.0
-    shares = 0.0
-    invested_total = 0.0
-    pending_years = set(first_trading_days.keys())
-    transactions = []
-
-    for dt in daily_index:
+    for dt in close.index:
         yr = dt.year
-        # 到達注資年份的第一個交易日 → 加入現金池
         if yr in pending_years and dt >= first_trading_days.get(yr, dt):
             cash_reserve += ANNUAL_BUDGET
             pending_years.discard(yr)
@@ -107,11 +106,10 @@ def _run_dca(
         if cash_reserve <= 0:
             continue
 
-        price = close.loc[dt]
+        price = float(close.loc[dt])
         if np.isnan(price) or price <= 0:
             continue
 
-        # 判斷是否允許買入
         can_buy = True
         if allow_buy is not None:
             can_buy = bool(allow_buy.loc[dt]) if dt in allow_buy.index else False
@@ -119,57 +117,52 @@ def _run_dca(
         if can_buy:
             bought = cash_reserve // price
             if bought > 0:
-                cost = bought * price
-                shares += bought
+                cost          = bought * price
+                shares_held  += bought
                 cash_reserve -= cost
                 invested_total += cost
                 transactions.append({
-                    "date": dt.date().isoformat(),
-                    "price": round(price, 2),
+                    "date":   dt.date().isoformat(),
+                    "price":  round(price, 2),
                     "shares": bought,
-                    "cost": round(cost, 0),
+                    "cost":   round(cost, 0),
                 })
 
-    final_price = close.iloc[-1]
-    final_value = shares * final_price + cash_reserve
-    total_invested = invested_total + cash_reserve   # 含未動用現金
+    final_price   = float(close.iloc[-1])
+    final_value   = shares_held * final_price + cash_reserve
+    total_invested = invested_total + cash_reserve
 
     if total_invested == 0:
         return {"label": label, "error": "zero invested"}
 
     total_return_pct = (final_value - total_invested) / total_invested * 100
-    n_years = max(1, END_YEAR - START_YEAR)
-    cagr = ((final_value / total_invested) ** (1 / n_years) - 1) * 100
+    n_years          = max(1, END_YEAR - START_YEAR)
+    cagr             = ((final_value / total_invested) ** (1 / n_years) - 1) * 100
 
-    # 計算最大回撤（依持股市值序列）
-    portfolio_values = []
-    running_shares = 0.0
-    running_cash = 0.0
-    tx_iter = iter(transactions)
-    next_tx = next(tx_iter, None)
-
-    for dt in daily_index:
+    # 最大回撤（持股市值序列）
+    pv_list   = []
+    run_sh    = 0.0
+    tx_iter   = iter(transactions)
+    next_tx   = next(tx_iter, None)
+    for dt in close.index:
         if next_tx and dt.date().isoformat() == next_tx["date"]:
-            running_shares += next_tx["shares"]
-            running_cash -= next_tx["cost"]
-            next_tx = next(tx_iter, None)
-        pv = running_shares * close.loc[dt]
-        portfolio_values.append(pv)
-
-    pv_series = pd.Series(portfolio_values, index=daily_index)
-    rolling_max = pv_series.cummax()
-    drawdown = (pv_series - rolling_max) / rolling_max.replace(0, np.nan) * 100
-    max_drawdown = drawdown.min()
+            run_sh  += next_tx["shares"]
+            next_tx  = next(tx_iter, None)
+        pv_list.append(run_sh * float(close.loc[dt]))
+    pv_s       = pd.Series(pv_list, index=close.index)
+    roll_max   = pv_s.cummax()
+    drawdown   = (pv_s - roll_max) / roll_max.replace(0, np.nan) * 100
+    max_dd     = float(drawdown.min())
 
     return {
-        "label": label,
-        "total_invested": round(total_invested, 0),
-        "final_value": round(final_value, 0),
-        "total_return_pct": round(total_return_pct, 2),
-        "cagr_pct": round(cagr, 2),
-        "max_drawdown_pct": round(max_drawdown, 2),
-        "n_transactions": len(transactions),
-        "last_tx": transactions[-3:] if transactions else [],
+        "label":             label,
+        "total_invested":    round(total_invested, 0),
+        "final_value":       round(final_value, 0),
+        "total_return_pct":  round(total_return_pct, 2),
+        "cagr_pct":          round(cagr, 2),
+        "max_drawdown_pct":  round(max_dd, 2),
+        "n_transactions":    len(transactions),
+        "last_tx":           transactions[-3:] if transactions else [],
     }
 
 
@@ -177,59 +170,77 @@ def _run_dca(
 
 def _crash_performance(close: pd.Series) -> list[dict]:
     results = []
-    close = close.dropna()
+    close   = close.dropna()
     for start_str, end_str, label in CRASH_PERIODS:
         start = pd.Timestamp(start_str, tz=TZ)
         end   = pd.Timestamp(end_str,   tz=TZ)
-        seg = close[(close.index >= start) & (close.index <= end)]
+        seg   = close[(close.index >= start) & (close.index <= end)]
         if len(seg) < 5:
             results.append({"period": label, "drawdown_pct": None})
             continue
-        peak = seg.iloc[0]
-        trough = seg.min()
+        peak     = seg.iloc[0]
+        trough   = seg.min()
         drawdown = (trough - peak) / peak * 100
         results.append({
-            "period": label,
-            "drawdown_pct": round(drawdown, 2),
-            "peak_date": seg.index[0].date().isoformat(),
-            "trough_date": seg.idxmin().date().isoformat(),
+            "period":       label,
+            "drawdown_pct": round(float(drawdown), 2),
+            "peak_date":    seg.index[0].date().isoformat(),
+            "trough_date":  seg.idxmin().date().isoformat(),
         })
     return results
 
 
 # ── 四策略批次比較 ──────────────────────────────────────────────────────────────
 
-def run_dca_backtest(symbol: str, name: str, cfg: dict) -> dict:
+def run_dca_backtest(symbol: str, name: str, cfg: dict,
+                     twii_close: pd.Series, etf50_close: pd.Series) -> dict:
     print(f"  DCA 回測 {symbol} {name}...")
-
-    df = fetch_10y(symbol)
+    df = fetch_long(symbol, period="10y")
     if df.empty or len(df) < 500:
         print(f"    [!] 資料不足（{len(df)} 天），跳過")
         return {"symbol": symbol, "name": name, "error": "資料不足"}
 
-    close = df["Close"]
-    rsi_cfg = cfg["signals"]["rsi"]
-    ma_cfg  = cfg["signals"]["ma"]
+    close  = df["Close"].dropna()
+    high   = df["High"].reindex(close.index)
+    low    = df["Low"].reindex(close.index)
+    volume = df["Volume"].reindex(close.index)
+    stock_cfg = SIGNAL_CONFIG.get(symbol, _DEFAULT_CFG)
 
-    rsi_filter = _rsi_oversold_filter(close, rsi_cfg["period"], oversold=40)
-    ma_filter  = _ma_bull_filter(close, ma_cfg["fast"], ma_cfg["slow"])
-    combined   = rsi_filter | ma_filter   # RSI 超賣 OR MA 多頭均可買入
+    # 預計算 v2 指標
+    rsi   = calc_rsi(close, 14)
+    avwap = calc_rolling_avwap(close, high, low, volume, lookback=60)
+    dd    = calc_rolling_dd(close, lookback=60)
+
+    b1 = avwap * stock_cfg["b1"]
+    b2 = avwap * stock_cfg["b2"]
+
+    # 布林過濾 Series
+    buy_filter   = (dd <= -0.10) & (close < b1) & (rsi <= stock_cfg["rsi_buy"])
+    sbuy_filter  = (dd <= -0.20) & (close < b2) & (rsi <= stock_cfg["rsi_sbuy"])
+
+    # 市場模式過濾：WARN/RISK 時才允許加碼（逆向加碼策略）
+    mode_series  = _build_market_mode_series(twii_close, etf50_close)
+    mode_aligned = mode_series.reindex(close.index, method="ffill").fillna("NORMAL")
+    market_dip   = mode_aligned.isin(["WARN", "RISK"])
 
     strategies = [
-        _run_dca(close, allow_buy=None,     label="B&H DCA（無條件）"),
-        _run_dca(close, allow_buy=rsi_filter, label="RSI擇時 DCA"),
-        _run_dca(close, allow_buy=ma_filter,  label="MA多頭過濾 DCA"),
-        _run_dca(close, allow_buy=combined,   label="組合策略 DCA"),
+        _run_dca(close, high, low, volume, symbol,
+                 allow_buy=None,        label="B&H DCA（無條件）"),
+        _run_dca(close, high, low, volume, symbol,
+                 allow_buy=buy_filter,  label="v2 BUY DCA"),
+        _run_dca(close, high, low, volume, symbol,
+                 allow_buy=sbuy_filter, label="v2 STRONG BUY DCA"),
+        _run_dca(close, high, low, volume, symbol,
+                 allow_buy=market_dip,  label="市場警戒逆向加碼"),
     ]
 
     crashes = _crash_performance(close)
-
-    result = {
-        "symbol": symbol,
-        "name": name,
-        "period": f"{START_YEAR}–{END_YEAR}",
-        "annual_budget": ANNUAL_BUDGET,
-        "strategies": strategies,
+    result  = {
+        "symbol":           symbol,
+        "name":             name,
+        "period":           f"{START_YEAR}–{END_YEAR}",
+        "annual_budget":    ANNUAL_BUDGET,
+        "strategies":       strategies,
         "crash_performance": crashes,
     }
 
@@ -241,13 +252,25 @@ def run_dca_backtest(symbol: str, name: str, cfg: dict) -> dict:
 
 
 def run_dca_all() -> list[dict]:
-    cfg = load_config()
+    cfg        = load_config()
     all_stocks = cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
-    results = []
 
+    # 預先下載 ^TWII 和 0050.TW（市場模式用）
+    print("  下載大盤資料（^TWII、0050）...")
+    twii  = yf.Ticker("^TWII").history(period="10y", auto_adjust=True)
+    etf50 = yf.Ticker("0050.TW").history(period="10y", auto_adjust=True)
+    if not twii.empty:
+        twii.index  = twii.index.tz_convert(TZ)
+    if not etf50.empty:
+        etf50.index = etf50.index.tz_convert(TZ)
+    twii_close  = twii["Close"].dropna()  if not twii.empty  else pd.Series(dtype=float)
+    etf50_close = etf50["Close"].dropna() if not etf50.empty else pd.Series(dtype=float)
+
+    results = []
     for stock in all_stocks:
         try:
-            r = run_dca_backtest(stock["symbol"], stock["name"], cfg)
+            r = run_dca_backtest(stock["symbol"], stock["name"], cfg,
+                                 twii_close, etf50_close)
             results.append(r)
         except Exception as e:
             print(f"    [ERROR] {stock['symbol']}: {e}")
@@ -262,19 +285,15 @@ def run_dca_all() -> list[dict]:
 
 def build_dca_embed(bt: dict) -> dict:
     if "error" in bt:
-        return {
-            "color": 0x95A5A6,
-            "title": f"📉 DCA 回測｜{bt['symbol']} {bt['name']}",
-            "description": f"⚠️ {bt['error']}",
-        }
+        return {"color": 0x95A5A6,
+                "title": f"📉 DCA 回測｜{bt['symbol']} {bt['name']}",
+                "description": f"⚠️ {bt['error']}"}
 
     strategies = [s for s in bt["strategies"] if "error" not in s]
     if not strategies:
         return {"color": 0x95A5A6, "title": bt["symbol"], "description": "無策略結果"}
 
-    # 找最佳策略（按總報酬排序）
-    best = max(strategies, key=lambda s: s["total_return_pct"])
-
+    best  = max(strategies, key=lambda s: s["total_return_pct"])
     lines = []
     for s in strategies:
         flag = "🏆" if s["label"] == best["label"] else "  "
@@ -285,58 +304,45 @@ def build_dca_embed(bt: dict) -> dict:
             f"最大回撤 `{s['max_drawdown_pct']}%`"
         )
 
-    # 股災分析
     crash_lines = []
     for c in bt.get("crash_performance", []):
         if c["drawdown_pct"] is not None:
-            severity = "🔴" if c["drawdown_pct"] < -30 else ("🟡" if c["drawdown_pct"] < -15 else "🟢")
-            crash_lines.append(f"{severity} {c['period']}：`{c['drawdown_pct']}%`")
+            sev = "🔴" if c["drawdown_pct"] < -30 else ("🟡" if c["drawdown_pct"] < -15 else "🟢")
+            crash_lines.append(f"{sev} {c['period']}：`{c['drawdown_pct']}%`")
         else:
             crash_lines.append(f"⬜ {c['period']}：資料不足")
 
-    fields = [
-        {
-            "name": f"📊 策略比較（每年投入 NT${bt['annual_budget']:,}，{bt['period']}）",
-            "value": "\n".join(lines),
-            "inline": False,
-        },
-    ]
+    fields = [{"name": f"📊 策略比較（每年 NT${bt['annual_budget']:,}，{bt['period']}）",
+               "value": "\n".join(lines), "inline": False}]
     if crash_lines:
-        fields.append({
-            "name": "🌪️ 股災期間最大跌幅",
-            "value": "\n".join(crash_lines),
-            "inline": False,
-        })
+        fields.append({"name": "🌪️ 股災期間最大跌幅",
+                        "value": "\n".join(crash_lines), "inline": False})
 
     return {
-        "color": 0x1ABC9C,
-        "title": f"💰 DCA 長期回測｜{bt['symbol']} {bt['name']}",
+        "color":  0x1ABC9C,
+        "title":  f"💰 DCA 回測 v2｜{bt['symbol']} {bt['name']}",
         "fields": fields,
         "footer": {"text": f"回測期間 {bt['period']}｜每年 NT${bt['annual_budget']:,}"},
     }
 
 
 def load_dca_cache() -> list[dict]:
-    import glob as _glob
     files = sorted(_glob.glob(str(CACHE_DIR / "dca_backtest_*.json")), reverse=True)
     if not files:
         return []
     return json.loads(Path(files[0]).read_text(encoding="utf-8"))
 
 
-# ── CLI ─────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     import sys
     from tw_discord import send_webhook, load_config as discord_cfg
 
-    print(f"=== 台股 DCA 長期回測 {START_YEAR}–{END_YEAR} ===\n")
+    print(f"=== 台股 DCA 長期回測 v2  {START_YEAR}–{END_YEAR} ===\n")
     results = run_dca_all()
 
-    push = "--push" in sys.argv
-    if push:
-        cfg = discord_cfg()
-        url = cfg["discord"]["webhook_url"]
+    if "--push" in sys.argv:
+        cfg    = discord_cfg()
+        url    = cfg["discord"]["webhook_url"]
         embeds = [build_dca_embed(r) for r in results]
         for i in range(0, len(embeds), 10):
             ok = send_webhook({"embeds": embeds[i:i+10]}, url)

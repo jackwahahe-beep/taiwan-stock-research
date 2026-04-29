@@ -1,8 +1,11 @@
 """
-台股信號回測模組
-- RSI 超賣買入 / 超買賣出策略
-- MA 黃金/死亡交叉策略
-- 輸出每檔股票回測指標，並附在 Discord 推播中
+台股信號回測模組 v2
+與 tw_screener.py v2 策略完全一致：
+  - AVWAP（60天低點錨定）
+  - DD（60天高點回撤）
+  - 個股化 RSI 閾值（SIGNAL_CONFIG）
+  - STRONG BUY / BUY / SELL 三段信號
+比較：B&H、BUY策略、STRONG_BUY策略
 """
 
 import yfinance as yf
@@ -10,14 +13,15 @@ import pandas as pd
 import numpy as np
 import yaml
 import json
+import glob as _glob
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from tw_screener import calc_rsi, load_config
+from tw_screener import calc_rsi, load_config, SIGNAL_CONFIG, _DEFAULT_CFG
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR  = Path(__file__).parent
 CACHE_DIR = BASE_DIR / "cache"
-TZ = ZoneInfo("Asia/Taipei")
+TZ        = ZoneInfo("Asia/Taipei")
 
 
 def fetch_long(symbol: str, period: str = "2y") -> pd.DataFrame:
@@ -29,95 +33,134 @@ def fetch_long(symbol: str, period: str = "2y") -> pd.DataFrame:
     return df
 
 
-# ── 核心回測引擎 ────────────────────────────────────────────────────────────────
+# ── 滾動 AVWAP（與 tw_screener 邏輯一致）──────────────────────────────────────
 
-def backtest_rsi(df: pd.DataFrame, cfg: dict) -> dict:
-    """RSI 超賣買入、超買賣出策略"""
-    sig = cfg["signals"]["rsi"]
-    close = df["Close"]
-    rsi = calc_rsi(close, sig["period"])
+def calc_rolling_avwap(close: pd.Series, high: pd.Series,
+                       low: pd.Series, volume: pd.Series,
+                       lookback: int = 60) -> pd.Series:
+    """每個時間點用過去資料計算 AVWAP，無未來資料洩漏。"""
+    n      = len(close)
+    result = np.full(n, np.nan)
+    c_arr  = close.values.astype(float)
+    h_arr  = high.values.astype(float)
+    l_arr  = low.values.astype(float)
+    v_arr  = volume.values.astype(float)
 
-    entries = (rsi.shift(1) > sig["oversold"]) & (rsi <= sig["oversold"])   # 剛跌破
-    exits   = (rsi.shift(1) < sig["overbought"]) & (rsi >= sig["overbought"])  # 剛突破
+    for i in range(n):
+        lb      = min(lookback, i + 1)
+        win_c   = c_arr[i - lb + 1: i + 1]
+        min_rel = int(np.argmin(win_c))
+        min_p   = win_c[min_rel]
+        curr    = c_arr[i]
+        confirmed = curr >= min_p * 1.05
+        anchor  = (i - lb + 1 + min_rel) if confirmed else (i - lb + 1)
 
-    return _run_backtest(close, entries, exits, label="RSI策略")
+        tp_seg  = (h_arr[anchor:i+1] + l_arr[anchor:i+1] + c_arr[anchor:i+1]) / 3
+        vol_seg = v_arr[anchor:i+1]
+        vs      = vol_seg.sum()
+        result[i] = float((tp_seg * vol_seg).sum() / vs) if vs > 0 else curr
 
-
-def backtest_ma(df: pd.DataFrame, cfg: dict) -> dict:
-    """MA 黃金交叉買入、死亡交叉賣出策略"""
-    ma_cfg = cfg["signals"]["ma"]
-    close = df["Close"]
-    fast = close.rolling(ma_cfg["fast"]).mean()
-    slow = close.rolling(ma_cfg["slow"]).mean()
-
-    entries = (fast.shift(1) <= slow.shift(1)) & (fast > slow)   # 黃金交叉
-    exits   = (fast.shift(1) >= slow.shift(1)) & (fast < slow)   # 死亡交叉
-
-    return _run_backtest(close, entries, exits, label="MA交叉策略")
+    return pd.Series(result, index=close.index)
 
 
-def _run_backtest(close: pd.Series, entries: pd.Series, exits: pd.Series,
-                  label: str, init_cash: float = 100_000) -> dict:
-    """通用逐筆交易回測引擎（純多頭）"""
-    cash = init_cash
-    position = 0.0
+def calc_rolling_dd(close: pd.Series, lookback: int = 60) -> pd.Series:
+    """每個時間點相對過去 lookback 天最高點的跌幅（負值）。"""
+    peak = close.rolling(lookback, min_periods=1).max()
+    return (close - peak) / peak
+
+
+# ── v2 回測引擎 ────────────────────────────────────────────────────────────────
+
+def _run_backtest_v2(
+    df: pd.DataFrame,
+    symbol: str,
+    label: str,
+    min_signal: str = "BUY",
+    init_cash: float = 100_000,
+) -> dict:
+    """
+    v2 信號回測（純多頭、逐日）。
+    min_signal="BUY"        → BUY 或 STRONG BUY 都進場
+    min_signal="STRONG BUY" → 只有 STRONG BUY 才進場
+    出場：RSI過熱 + 超過AVWAP目標 + 高於MA20×1.15（三條同時）
+    """
+    cfg   = SIGNAL_CONFIG.get(symbol, _DEFAULT_CFG)
+    close = df["Close"].dropna()
+    high  = df["High"].reindex(close.index)
+    low   = df["Low"].reindex(close.index)
+    vol   = df["Volume"].reindex(close.index)
+
+    rsi   = calc_rsi(close, 14)
+    ma20  = close.rolling(20).mean()
+    avwap = calc_rolling_avwap(close, high, low, vol, lookback=60)
+    dd    = calc_rolling_dd(close, lookback=60)
+
+    cash        = init_cash
+    position    = 0.0
     entry_price = 0.0
-    trades = []
+    trades      = []
 
-    for i in range(1, len(close)):
-        price = close.iloc[i]
-        if np.isnan(price):
+    for i in range(60, len(close)):
+        price   = float(close.iloc[i])
+        rsi_v   = float(rsi.iloc[i])
+        avwap_v = float(avwap.iloc[i])
+        dd_v    = float(dd.iloc[i])
+        ma20_v  = float(ma20.iloc[i])
+
+        if any(np.isnan(x) for x in [price, rsi_v, avwap_v, dd_v, ma20_v]):
             continue
 
-        if position == 0 and entries.iloc[i]:
+        b1 = avwap_v * cfg["b1"]
+        b2 = avwap_v * cfg["b2"]
+        s  = avwap_v * cfg["s"]
+
+        is_strong = dd_v <= -0.20 and price < b2 and rsi_v <= cfg["rsi_sbuy"]
+        is_buy    = dd_v <= -0.10 and price < b1 and rsi_v <= cfg["rsi_buy"]
+        enter     = (is_strong or (min_signal == "BUY" and is_buy)) and position == 0
+
+        is_sell = (rsi_v >= cfg["rsi_sell"]
+                   and price >= s
+                   and price > ma20_v * 1.15)
+
+        if enter:
             shares = cash // price
             if shares > 0:
-                position = shares
+                position    = shares
                 entry_price = price
-                cash -= shares * price
+                cash       -= shares * price
 
-        elif position > 0 and exits.iloc[i]:
-            proceeds = position * price
+        elif position > 0 and is_sell:
             pnl_pct = (price - entry_price) / entry_price * 100
             trades.append({
-                "entry": round(entry_price, 2),
-                "exit": round(price, 2),
+                "entry":   round(entry_price, 2),
+                "exit":    round(price, 2),
                 "pnl_pct": round(pnl_pct, 2),
-                "date": close.index[i].date().isoformat(),
+                "date":    close.index[i].date().isoformat(),
             })
-            cash += proceeds
+            cash    += position * price
             position = 0
 
-    # 未平倉按最後收盤算
-    final_value = cash + position * close.dropna().iloc[-1]
+    final_value  = cash + position * float(close.dropna().iloc[-1])
     total_return = (final_value - init_cash) / init_cash * 100
 
     if not trades:
-        return {
-            "label": label,
-            "total_return_pct": round(total_return, 2),
-            "trades": 0,
-            "win_rate": None,
-            "avg_pnl_pct": None,
-            "max_loss_pct": None,
-        }
+        return {"label": label, "total_return_pct": round(total_return, 2),
+                "trades": 0, "win_rate": None, "avg_pnl_pct": None, "max_loss_pct": None}
 
     pnls = [t["pnl_pct"] for t in trades]
     wins = [p for p in pnls if p > 0]
-
     return {
-        "label": label,
+        "label":            label,
         "total_return_pct": round(total_return, 2),
-        "trades": len(trades),
-        "win_rate": round(len(wins) / len(trades) * 100, 1),
-        "avg_pnl_pct": round(np.mean(pnls), 2),
-        "max_loss_pct": round(min(pnls), 2),
-        "trade_log": trades[-5:],   # 最近 5 筆
+        "trades":           len(trades),
+        "win_rate":         round(len(wins) / len(trades) * 100, 1),
+        "avg_pnl_pct":      round(np.mean(pnls), 2),
+        "max_loss_pct":     round(min(pnls), 2),
+        "trade_log":        trades[-5:],
     }
 
 
 def calc_bnh_return(close: pd.Series) -> float:
-    """Buy & Hold 基準報酬"""
     clean = close.dropna()
     if len(clean) < 2:
         return 0.0
@@ -127,13 +170,13 @@ def calc_bnh_return(close: pd.Series) -> float:
 # ── 批次回測 ────────────────────────────────────────────────────────────────────
 
 def run_backtest_all(period: str = "2y") -> list[dict]:
-    cfg = load_config()
-    results = []
+    cfg        = load_config()
+    results    = []
     all_stocks = cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
 
     for stock in all_stocks:
         symbol = stock["symbol"]
-        name = stock["name"]
+        name   = stock["name"]
         print(f"  回測 {symbol} {name}...")
 
         try:
@@ -142,20 +185,20 @@ def run_backtest_all(period: str = "2y") -> list[dict]:
                 print(f"    [!] 資料不足，跳過")
                 continue
 
-            bnh = calc_bnh_return(df["Close"])
-            rsi_bt = backtest_rsi(df, cfg)
-            ma_bt  = backtest_ma(df, cfg)
+            bnh     = calc_bnh_return(df["Close"])
+            bt_buy  = _run_backtest_v2(df, symbol, "v2 BUY策略",       min_signal="BUY")
+            bt_sbuy = _run_backtest_v2(df, symbol, "v2 STRONG BUY策略", min_signal="STRONG BUY")
 
             entry = {
-                "symbol": symbol,
-                "name": name,
-                "period": period,
+                "symbol":         symbol,
+                "name":           name,
+                "period":         period,
                 "bnh_return_pct": bnh,
-                "strategies": [rsi_bt, ma_bt],
+                "strategies":     [bt_buy, bt_sbuy],
             }
             results.append(entry)
 
-            for s in [rsi_bt, ma_bt]:
+            for s in [bt_buy, bt_sbuy]:
                 wr = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
                 print(f"    {s['label']}: 總報酬 {s['total_return_pct']}%  勝率 {wr}  交易 {s['trades']} 次")
             print(f"    B&H 基準: {bnh}%")
@@ -169,29 +212,26 @@ def run_backtest_all(period: str = "2y") -> list[dict]:
     return results
 
 
-# ── Discord embed 格式化 ────────────────────────────────────────────────────────
+# ── Discord embed ──────────────────────────────────────────────────────────────
 
 def build_backtest_embed(bt: dict) -> dict:
     lines = []
     for s in bt["strategies"]:
-        wr = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
+        wr   = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
         flag = "✅" if s["total_return_pct"] > bt["bnh_return_pct"] else "⚠️"
         lines.append(
             f"{flag} **{s['label']}** — 總報酬 `{s['total_return_pct']}%`  "
             f"勝率 `{wr}`  交易 `{s['trades']}` 次"
         )
     lines.append(f"📌 B&H 基準: `{bt['bnh_return_pct']}%`（{bt['period']}）")
-
     return {
-        "color": 0x9B59B6,
-        "title": f"📈 回測｜{bt['symbol']} {bt['name']}",
+        "color":       0x9B59B6,
+        "title":       f"📈 回測 v2｜{bt['symbol']} {bt['name']}",
         "description": "\n".join(lines),
     }
 
 
 def load_backtest_cache() -> dict:
-    """讀取最新回測快取，回傳 {symbol: bt_result} 供買入推播使用"""
-    import glob as _glob
     files = sorted(_glob.glob(str(CACHE_DIR / "backtest_*.json")), reverse=True)
     if not files:
         return {}
@@ -200,6 +240,6 @@ def load_backtest_cache() -> dict:
 
 
 if __name__ == "__main__":
-    print("=== 台股策略回測 ===\n")
+    print("=== 台股策略回測 v2 ===\n")
     results = run_backtest_all()
     print(f"\n完成，共回測 {len(results)} 檔")

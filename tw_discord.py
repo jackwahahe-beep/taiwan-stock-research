@@ -64,7 +64,7 @@ def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None) -> d
         {"name": "現價", "value": f"NT${price}", "inline": True},
         {"name": "RSI", "value": str(stock["rsi"]), "inline": True},
         {"name": "MA20 / MA60", "value": f"{stock['ma_fast']} / {stock['ma_slow']}", "inline": True},
-        {"name": "📌 建議買入", "value": f"`{suggested_shares}` 股　預估成本 NT${estimated_cost:,.0f}", "inline": False},
+        {"name": "📌 建議進場", "value": f"掛單價 `NT${price}`　買 `{suggested_shares}` 股　預估成本 `NT${estimated_cost:,.0f}`", "inline": False},
         {"name": "觸發信號", "value": reasons_text, "inline": False},
     ]
 

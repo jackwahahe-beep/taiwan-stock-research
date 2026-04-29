@@ -151,6 +151,49 @@ def run_portfolio_check() -> list[dict]:
     return results
 
 
+# ── 賣出建議計算 ─────────────────────────────────────────────────────────────────
+
+def _calc_sell_rec(result: dict, action: str) -> dict:
+    """
+    根據 action 給出具體賣出建議：
+    - SELL_STRONG  → 全賣（獲利出場）
+    - EXIT_BOUNCE  → 減碼一半（保留另半等更高點）
+    - SELL_WATCH   → 全賣停損，附帶 -10% 停損參考價
+    - 其他         → 不操作
+    """
+    shares = result["shares"]
+    cost   = result["cost"]
+    price  = result["price"]
+
+    if action == "SELL_STRONG":
+        sell_shares = shares
+        suggestion  = "🔴 建議全部賣出（獲利了結）"
+
+    elif action == "EXIT_BOUNCE":
+        sell_shares = max(1, shares // 2)
+        suggestion  = "🟠 建議先出一半（保留另半等反彈高點再出）"
+
+    elif action == "SELL_WATCH":
+        sell_shares = shares
+        stop_ref    = round(cost * 0.9, 2) if cost > 0 else price
+        suggestion  = f"🟡 建議全出停損（成本 -10% 參考價 NT${stop_ref}）"
+
+    else:
+        sell_shares = 0
+        suggestion  = "⏳ 暫不操作，持續觀察"
+
+    proceeds     = round(sell_shares * price, 0)
+    realized_pnl = round((price - cost) * sell_shares, 0) if cost > 0 else int(proceeds)
+
+    return {
+        "sell_shares":  sell_shares,
+        "sell_price":   price,
+        "proceeds":     int(proceeds),
+        "realized_pnl": int(realized_pnl),
+        "suggestion":   suggestion,
+    }
+
+
 # ── Discord embeds ───────────────────────────────────────────────────────────────
 
 ACTION_COLOR = {
@@ -212,14 +255,28 @@ def build_portfolio_embeds(results: list[dict]) -> list[dict]:
         sig = advice.get("signals", {})
         rsi_str = str(sig.get("rsi", "N/A")) if sig else "N/A"
 
+        rec = _calc_sell_rec(r, action)
+        pnl_sign = "+" if rec["realized_pnl"] >= 0 else ""
+
+        if rec["sell_shares"] > 0:
+            sell_detail = (
+                f"{rec['suggestion']}\n"
+                f"賣出 `{rec['sell_shares']}` 股 @ `NT${rec['sell_price']}`　"
+                f"預估回收 `NT${rec['proceeds']:,}`　"
+                f"實現損益 `NT${pnl_sign}{rec['realized_pnl']:,}`"
+            )
+        else:
+            sell_detail = rec["suggestion"]
+
         embeds.append({
             "color": color,
             "title": f"{label}｜{r['symbol']} {r['name']}",
             "fields": [
-                {"name": "現價", "value": f"NT${r['price']}", "inline": True},
+                {"name": "現價",     "value": f"NT${r['price']}", "inline": True},
                 {"name": "持股損益", "value": f"NT${r['pnl']:+,}（{pct_str}）", "inline": True},
-                {"name": "RSI", "value": rsi_str, "inline": True},
+                {"name": "RSI",      "value": rsi_str, "inline": True},
                 {"name": "操作依據", "value": reasons_text, "inline": False},
+                {"name": "📌 賣出建議", "value": sell_detail, "inline": False},
             ],
             "footer": {"text": f"成本 NT${r['cost']} × {r['shares']} 股"},
         })

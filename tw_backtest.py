@@ -223,6 +223,7 @@ def run_backtest_all(period: str = "2y") -> list[dict]:
             print(f"    [ERROR] {symbol}: {e}")
 
     cache_file = CACHE_DIR / f"backtest_{date.today().isoformat()}.json"
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n回測結果已快取至 {cache_file}")
     return results

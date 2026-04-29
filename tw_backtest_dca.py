@@ -304,6 +304,7 @@ def run_dca_all() -> list[dict]:
             print(f"    [ERROR] {stock['symbol']}: {e}")
 
     cache_file = CACHE_DIR / f"dca_backtest_{date.today().isoformat()}.json"
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nDCA 回測快取至 {cache_file}")
     return results

@@ -54,9 +54,9 @@ def run_once(run_backtest: bool = False):
     cfg = discord_cfg()
     webhook_url = cfg["discord"]["webhook_url"]
 
-    # 1. 回測（若旗標或無快取則重新執行，否則讀快取）
+    # 1. 回測（手動 --backtest 才重新跑，否則只讀快取）
     bt_cache = load_backtest_cache()
-    if run_backtest or not bt_cache:
+    if run_backtest:
         print(f"\n--- 執行策略回測 ---")
         bt_results = run_backtest_all()
         bt_cache = {r["symbol"]: r for r in bt_results}

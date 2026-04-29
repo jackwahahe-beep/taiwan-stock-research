@@ -1,0 +1,46 @@
+# 台股追蹤清單設定
+watchlist:
+  etf:
+    - symbol: "0050.TW"
+      name: "元大台灣50"
+    - symbol: "00878.TW"
+      name: "國泰永續高股息"
+    - symbol: "006208.TW"
+      name: "富邦台50"
+    - symbol: "00713.TW"
+      name: "元大台灣高息低波"
+  ai_tech:
+    - symbol: "2330.TW"
+      name: "台積電"
+    - symbol: "2454.TW"
+      name: "聯發科"
+    - symbol: "3711.TW"
+      name: "日月光投控"
+    - symbol: "2303.TW"
+      name: "聯華電子"
+    - symbol: "6770.TW"
+      name: "力積電"
+
+# 信號參數
+signals:
+  rsi:
+    period: 14
+    oversold: 30       # RSI 低於此值 → 買入信號
+    overbought: 70     # RSI 高於此值 → 賣出信號
+  ma:
+    fast: 20
+    slow: 60
+  volume_spike: 1.5    # 成交量為 20 日均量的倍數
+
+# Discord Webhook（執行前填入你的 URL）
+discord:
+  webhook_url: "YOUR_DISCORD_WEBHOOK_URL_HERE"
+  mention_role: ""     # 可選，填 Discord role ID 例如 "<@&123456>"
+
+# 排程
+schedule:
+  # 台股盤前掃描（09:00 開盤，08:45 掃描）
+  pre_market: "08:45"
+  # 盤後收盤結算（13:30 收盤，14:00 結算）
+  post_market: "14:00"
+  timezone: "Asia/Taipei"

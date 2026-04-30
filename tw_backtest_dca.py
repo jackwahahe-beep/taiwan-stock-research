@@ -106,11 +106,13 @@ def _run_dca(
         return {"label": label, "error": "no data"}
 
     years = range(START_YEAR, END_YEAR + 1)
-    first_trading_days = {}
+    first_trading_days: dict = {}
+    last_trading_days:  dict = {}
     for yr in years:
         yr_data = close[close.index.year == yr]
         if not yr_data.empty:
             first_trading_days[yr] = yr_data.index[0]
+            last_trading_days[yr]  = yr_data.index[-1]
 
     cash_reserve   = 0.0
     shares_held    = 0.0
@@ -135,20 +137,27 @@ def _run_dca(
         if allow_buy is not None:
             can_buy = bool(allow_buy.loc[dt]) if dt in allow_buy.index else False
 
-        if can_buy:
+        # 年末強制投入：若擇時策略全年未部署，最後一個交易日強制買入
+        is_year_end = (allow_buy is not None
+                       and dt == last_trading_days.get(yr)
+                       and cash_reserve > 0)
+
+        if can_buy or is_year_end:
             bought = cash_reserve // price
             if bought > 0:
-                cost          = bought * price
-                shares_held  += bought
-                cash_reserve -= cost
+                cost           = bought * price
+                shares_held   += bought
+                cash_reserve  -= cost
                 invested_total += cost
+                is_fallback    = is_year_end and not can_buy
                 tx: dict = {
-                    "date":   dt.date().isoformat(),
-                    "price":  round(price, 2),
-                    "shares": bought,
-                    "cost":   round(cost, 0),
+                    "date":     dt.date().isoformat(),
+                    "price":    round(price, 2),
+                    "shares":   bought,
+                    "cost":     round(cost, 0),
+                    "fallback": is_fallback,
                 }
-                if indicator_series:
+                if not is_fallback and indicator_series:
                     trigger = {}
                     for k, ser in indicator_series.items():
                         if isinstance(ser, pd.Series):
@@ -190,14 +199,17 @@ def _run_dca(
     drawdown   = (pv_s - roll_max) / roll_max.replace(0, np.nan) * 100
     max_dd     = float(drawdown.min())
 
+    profit = final_value - total_invested
     return {
         "label":             label,
         "total_invested":    round(total_invested, 0),
         "final_value":       round(final_value, 0),
+        "profit":            round(profit, 0),
         "total_return_pct":  round(total_return_pct, 2),
         "cagr_pct":          round(cagr, 2),
         "max_drawdown_pct":  round(max_dd, 2),
         "n_transactions":    len(transactions),
+        "final_price":       round(final_price, 2),
         "transactions":      transactions,
     }
 
@@ -228,10 +240,22 @@ def _crash_performance(close: pd.Series) -> list[dict]:
 
 # ── 四策略批次比較 ──────────────────────────────────────────────────────────────
 
+def _fetch_dca_data(symbol: str) -> pd.DataFrame:
+    """用明確起始日期抓 10 年資料（period='10y' 對台股 .TW 不穩定）。"""
+    ticker = yf.Ticker(symbol)
+    df = ticker.history(start=f"{START_YEAR}-01-01",
+                        end=f"{END_YEAR}-12-31",
+                        auto_adjust=True)
+    if df.empty:
+        return df
+    df.index = df.index.tz_convert(TZ)
+    return df
+
+
 def run_dca_backtest(symbol: str, name: str, cfg: dict,
                      twii_close: pd.Series, etf50_close: pd.Series) -> dict:
     print(f"  DCA 回測 {symbol} {name}...")
-    df = fetch_long(symbol, period="10y")
+    df = _fetch_dca_data(symbol)
     if df.empty or len(df) < 500:
         print(f"    [!] 資料不足（{len(df)} 天），跳過")
         return {"symbol": symbol, "name": name, "error": "資料不足"}

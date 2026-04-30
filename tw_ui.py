@@ -381,10 +381,52 @@ class TwStrategyApp(ctk.CTk):
         ctk.CTkLabel(self._bt_detail,
                      text=f"📊 10年 DCA 回測　{period}　每年注資 NT${budget:,}",
                      font=(self.ui_font, 13, "bold"), text_color=C_BLUE
-                     ).pack(anchor="w", padx=16, pady=(0, 8))
+                     ).pack(anchor="w", padx=16, pady=(0, 6))
 
-        # B&H DCA 基準
-        bnh_strat = next((s for s in dca.get("strategies", []) if "B&H" in s["label"]), None)
+        # ── 摘要比較表 ────────────────────────────────────────────────────────
+        strategies = dca.get("strategies", [])
+        if strategies:
+            tbl = ctk.CTkFrame(self._bt_detail, fg_color="#0a1020", corner_radius=8)
+            tbl.pack(fill="x", padx=12, pady=(0, 10))
+
+            headers = ["策略", "CAGR", "總報酬", "獲利", "終值", "MDD"]
+            col_w   = [160, 60, 70, 100, 100, 60]
+            hdr_row = ctk.CTkFrame(tbl, fg_color="#0f1a30")
+            hdr_row.pack(fill="x", padx=2, pady=(2, 0))
+            for h, w in zip(headers, col_w):
+                ctk.CTkLabel(hdr_row, text=h, font=(self.ui_font, 10, "bold"),
+                             text_color="#74b9ff", width=w, anchor="center"
+                             ).pack(side="left")
+
+            bnh_cagr = next((s.get("cagr_pct", 0) for s in strategies if "B&H" in s["label"]), 0)
+            for strat in strategies:
+                lbl    = strat["label"]
+                cagr   = strat.get("cagr_pct", 0)
+                total  = strat.get("total_return_pct", 0)
+                profit = strat.get("profit", strat.get("final_value", 0) - strat.get("total_invested", 0))
+                fval   = strat.get("final_value", 0)
+                mdd    = strat.get("max_drawdown_pct", 0)
+                beat   = cagr > bnh_cagr and "B&H" not in lbl
+                clr    = C_GREEN if beat else (C_STRONG if "B&H" in lbl else C_YELLOW)
+
+                data_row = ctk.CTkFrame(tbl, fg_color="#0d1525" if beat else "transparent")
+                data_row.pack(fill="x", padx=2, pady=1)
+                for val, w in zip([
+                    lbl.replace("（無條件）","").replace("（趨勢股，無條件）",""),
+                    f"{cagr:.1f}%",
+                    f"{total:+.1f}%",
+                    f"NT${profit:,.0f}",
+                    f"NT${fval:,.0f}",
+                    f"{mdd:.1f}%",
+                ], col_w):
+                    ctk.CTkLabel(data_row, text=val, font=(self.ui_font, 10),
+                                 text_color=clr, width=w, anchor="center"
+                                 ).pack(side="left")
+        else:
+            bnh_cagr = 0
+
+        # B&H DCA 基準（供下方策略卡片比較用）
+        bnh_strat = next((s for s in strategies if "B&H" in s["label"]), None)
         bnh_cagr  = bnh_strat["cagr_pct"] if bnh_strat else 0
 
         for strat in dca.get("strategies", []):
@@ -441,8 +483,8 @@ class TwStrategyApp(ctk.CTk):
                     font=(self.ui_font, 11),
                     fg_color="#1a3a60", hover_color="#2d5a8e",
                     text_color="#74b9ff", height=26,
-                    command=lambda t=txs, l=lbl: self._dca_popup(
-                        t, f"{sym.replace('.TW','')} {name}", l),
+                    command=lambda t=txs, l=lbl, fp=strat.get("final_price", 0.0): self._dca_popup(
+                        t, f"{sym.replace('.TW','')} {name}", l, final_price=fp),
                 ).pack(anchor="w", padx=14, pady=(2, 10))
 
     # ── 策略說明 ──────────────────────────────────────────────────────────────────
@@ -526,7 +568,8 @@ class TwStrategyApp(ctk.CTk):
                  justify="left", wraplength=460
                  ).pack(anchor="w", padx=16, pady=(0, 16))
 
-    def _dca_popup(self, transactions: list[dict], stock: str, strategy: str):
+    def _dca_popup(self, transactions: list[dict], stock: str, strategy: str,
+                   final_price: float = 0.0):
         import tkinter as tk
         from tkinter import ttk as _ttk
 
@@ -540,7 +583,8 @@ class TwStrategyApp(ctk.CTk):
 
         win = tk.Toplevel(self)
         win.title(f"{stock}  {strategy}")
-        win.geometry(f"{'860' if has_trigger else '640'}x480")
+        base_w = 820 if has_trigger else 660
+        win.geometry(f"{base_w}x500")
         win.configure(bg="#0f1a30")
         win.lift()
 
@@ -549,19 +593,28 @@ class TwStrategyApp(ctk.CTk):
         tk.Label(hdr, text=f"{stock}  {strategy}",
                  fg="#74b9ff", bg="#0f1a30",
                  font=(self.ui_font, 12, "bold")).pack(side="left")
-        tk.Label(hdr, text=f"  共 {len(transactions)} 筆注資",
+        tk.Label(hdr, text=f"  共 {len(transactions)} 筆",
                  fg="#888", bg="#0f1a30",
                  font=("Consolas", 11)).pack(side="left")
 
-        total_cost = sum(t.get("cost", 0) for t in transactions)
+        total_cost   = sum(t.get("cost", 0) for t in transactions)
+        n_fallback   = sum(1 for t in transactions if t.get("fallback"))
         smr = tk.Frame(win, bg="#1a2a40")
         smr.pack(fill="x", padx=10, pady=2)
-        tk.Label(smr, text=f"總注資  NT${total_cost:,.0f}",
+        tk.Label(smr, text=f"總投入  NT${total_cost:,.0f}",
                  fg="#fdcb6e", bg="#1a2a40",
                  font=("Consolas", 10)).pack(side="left", padx=10, pady=4)
-        if has_trigger:
-            tk.Label(smr, text="  ← 觸發條件欄位：記錄加碼當日各指標數值",
-                     fg="#888", bg="#1a2a40",
+        if final_price > 0:
+            total_shares = sum(t.get("shares", 0) for t in transactions)
+            cur_val = total_shares * final_price
+            ret_pct = (cur_val - total_cost) / total_cost * 100 if total_cost > 0 else 0
+            clr = "#00b894" if ret_pct >= 0 else "#d63031"
+            tk.Label(smr, text=f"  期末市值  NT${cur_val:,.0f}  ({ret_pct:+.1f}%)",
+                     fg=clr, bg="#1a2a40",
+                     font=("Consolas", 10)).pack(side="left", padx=4, pady=4)
+        if n_fallback:
+            tk.Label(smr, text=f"  （含 {n_fallback} 筆年末強制投入）",
+                     fg="#636e72", bg="#1a2a40",
                      font=("Consolas", 9)).pack(side="left", padx=4)
 
         sty = _ttk.Style(win)
@@ -575,10 +628,10 @@ class TwStrategyApp(ctk.CTk):
                       font=(self.ui_font, 11, "bold"))
         sty.map("D.Treeview", background=[("selected", "#1c4f82")])
 
-        base_cols   = ("注資日期", "買入價格", "買入股數", "注資金額")
-        base_widths = (130, 110, 100, 120)
+        base_cols   = ("投資日期", "買入價", "股數", "投入金額", "持有報酬%")
+        base_widths = (110, 90, 70, 110, 90)
         trig_cols   = tuple(trigger_keys)
-        trig_widths = tuple(90 for _ in trigger_keys)
+        trig_widths = tuple(88 for _ in trigger_keys)
         cols   = base_cols + trig_cols
         widths = base_widths + trig_widths
 
@@ -591,22 +644,30 @@ class TwStrategyApp(ctk.CTk):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor="center")
 
+        tree.tag_configure("signal",   foreground="#74b9ff")
+        tree.tag_configure("fallback", foreground="#636e72")
+
         vsb = _ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
         for t in transactions:
+            buy_price = t.get("price", 0)
+            ret_str   = (f"{(final_price / buy_price - 1) * 100:+.1f}%"
+                         if final_price > 0 and buy_price > 0 else "—")
+            is_fb     = t.get("fallback", False)
             vals: tuple = (
-                t.get("date", "?"),
-                f"{t.get('price', 0):,.2f}",
+                t.get("date", "?") + (" ↩" if is_fb else ""),
+                f"{buy_price:,.2f}",
                 f"{int(t.get('shares', 0)):,}",
                 f"NT${t.get('cost', 0):,.0f}",
+                ret_str,
             )
             if has_trigger:
                 trig = t.get("trigger", {})
                 vals += tuple(str(trig.get(k, "—")) for k in trigger_keys)
-            tree.insert("", "end", values=vals)
+            tree.insert("", "end", tags=("fallback" if is_fb else "signal",), values=vals)
 
     # ════════════════════════════════════════════════════════════════════
     # 掃描 Tab 邏輯

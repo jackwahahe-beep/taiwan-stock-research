@@ -45,22 +45,33 @@ def _fetch(symbol: str) -> pd.DataFrame:
     return df
 
 
-# ── 滾動 AVWAP（無未來資料洩漏）─────────────────────────────────────────
+# ── 滾動 AVWAP（與 tw_screener.calc_avwap 邏輯一致）──────────────────────
 
 def _rolling_avwap(close: pd.Series, volume: pd.Series,
+                   high: pd.Series, low: pd.Series,
                    lookback: int = 60) -> pd.Series:
-    c = close.values.astype(float)
-    v = volume.values.astype(float)
-    n = len(c)
+    """
+    複製 calc_avwap 的錨點邏輯：
+    - 若當前價已從 60 日低點反彈 ≥5%（confirmed）→ 錨點 = 60 日最低收盤
+    - 否則（仍在下跌）→ 錨點 = 60 日窗口起點，使 AVWAP 明顯高於現價
+    使用 typical price (H+L+C)/3 計算 VWAP，與即時掃描器一致。
+    """
+    c  = close.values.astype(float)
+    v  = volume.values.astype(float)
+    tp = ((high.values + low.values + c) / 3).astype(float)
+    n  = len(c)
     out = np.full(n, np.nan)
     for i in range(lookback - 1, n):
-        s      = max(0, i - lookback + 1)
-        win_c  = c[s: i + 1]
-        anchor = int(np.argmin(win_c))      # 錨點 = 窗口最低收盤
-        sc     = c[s + anchor: i + 1]
-        sv     = v[s + anchor: i + 1]
-        tv     = sv.sum()
-        out[i] = (sc * sv).sum() / tv if tv > 0 else sc.mean()
+        s        = max(0, i - lookback + 1)
+        win_c    = c[s: i + 1]
+        min_rel  = int(np.argmin(win_c))
+        min_px   = win_c[min_rel]
+        confirmed = c[i] >= min_px * 1.05   # 反彈 5% 才以低點為錨
+        anchor   = s + (min_rel if confirmed else 0)
+        sl = tp[anchor: i + 1]
+        sv = v[anchor: i + 1]
+        tv = sv.sum()
+        out[i] = (sl * sv).sum() / tv if tv > 0 else sl.mean()
     return pd.Series(out, index=close.index)
 
 
@@ -72,9 +83,11 @@ def _daily_signals(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
     close  = df["Close"].dropna()
     volume = df["Volume"].reindex(close.index).fillna(0).clip(lower=1)
+    high   = df["High"].reindex(close.index).fillna(close)
+    low    = df["Low"].reindex(close.index).fillna(close)
 
     rsi     = calc_rsi(close)
-    avwap   = _rolling_avwap(close, volume, lookback=60)
+    avwap   = _rolling_avwap(close, volume, high, low, lookback=60)
     ma20    = close.rolling(20).mean()
     roll_hi = close.rolling(60).max()
     dd_pct  = (close / roll_hi - 1) * 100   # 恆 ≤ 0

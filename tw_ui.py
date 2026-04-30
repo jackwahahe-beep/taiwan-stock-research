@@ -79,14 +79,6 @@ def _load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def _load_backtest_cache() -> dict:
-    files = sorted(_glob.glob(str(CACHE_DIR / "backtest_*.json")), reverse=True)
-    if not files:
-        return {}
-    data = json.loads(Path(files[0]).read_text(encoding="utf-8"))
-    return {r["symbol"]: r for r in data}
-
-
 def _load_dca_cache() -> dict:
     files = sorted(_glob.glob(str(CACHE_DIR / "dca_backtest_*.json")), reverse=True)
     if not files:
@@ -169,7 +161,6 @@ class TwStrategyApp(ctk.CTk):
         self._loading      = False
         self._scan_records: list[dict] = []
         self._cfg:          dict       = {}
-        self._bt_cache:     dict       = {}
         self._bt_btns:      dict       = {}
 
         self._setup_style()
@@ -325,7 +316,6 @@ class TwStrategyApp(ctk.CTk):
         self._bt_detail.pack(fill="both", expand=True)
 
         # 載入快取 & 填充股票清單
-        self._bt_cache  = _load_backtest_cache()
         self._dca_cache = _load_dca_cache()
         self._bt_btns   = {}
 
@@ -337,7 +327,7 @@ class TwStrategyApp(ctk.CTk):
 
         for s in stocks:
             sym, name = s["symbol"], s["name"]
-            has = sym in self._bt_cache
+            has = sym in self._dca_cache
             btn = ctk.CTkButton(
                 self._bt_list,
                 text=f"{sym.replace('.TW','')}  {name}",
@@ -355,14 +345,14 @@ class TwStrategyApp(ctk.CTk):
     def _bt_reset_hint(self):
         for w in self._bt_detail.winfo_children():
             w.destroy()
-        if not self._bt_cache:
+        if not self._dca_cache:
             ctk.CTkLabel(self._bt_detail,
-                         text="尚無回測快取\n\n請先執行：\npython tw_scheduler.py --backtest",
+                         text="尚無 DCA 快取\n\n請先執行：\npython tw_scheduler.py --dca",
                          font=(self.ui_font, 13), text_color=C_YELLOW,
                          justify="center").pack(pady=60)
         else:
             ctk.CTkLabel(self._bt_detail,
-                         text="← 點選左側股票查看回測明細",
+                         text="← 點選左側股票查看 10年 DCA 回測",
                          font=(self.ui_font, 13), text_color=C_GRAY
                          ).pack(pady=60)
 
@@ -373,96 +363,13 @@ class TwStrategyApp(ctk.CTk):
         for w in self._bt_detail.winfo_children():
             w.destroy()
 
-        bt = self._bt_cache.get(sym)
-        if not bt:
-            ctk.CTkLabel(self._bt_detail,
-                         text=f"⚠️ {sym} 無回測資料\n請先執行：python tw_scheduler.py --backtest",
-                         font=(self.ui_font, 12), text_color=C_YELLOW).pack(pady=40)
-            return
-
-        bnh = bt.get("bnh_return_pct", 0)
-
-        ctk.CTkLabel(self._bt_detail,
-                     text=f"{sym.replace('.TW','')} {name}　{bt.get('period','2y')} 回測",
-                     font=(self.ui_font, 15, "bold"), text_color=C_WHITE
-                     ).pack(anchor="w", padx=16, pady=(16, 2))
-        ctk.CTkLabel(self._bt_detail,
-                     text=f"📌 B&H 買入持有基準：{bnh:+.2f}%",
-                     font=(self.ui_font, 12), text_color=C_BLUE
-                     ).pack(anchor="w", padx=16, pady=(0, 12))
-
-        for strat in bt.get("strategies", []):
-            self._bt_strat_card(strat, bnh, sym, name)
-
-        # 10Y DCA 區塊
         dca = self._dca_cache.get(sym)
         if dca:
             self._bt_dca_section(dca, sym, name)
         else:
             ctk.CTkLabel(self._bt_detail,
-                         text="⚠️ 無 10年DCA快取　請先執行：python tw_scheduler.py --dca",
-                         font=(self.ui_font, 11), text_color=C_GRAY
-                         ).pack(anchor="w", padx=16, pady=(8, 4))
-
-    def _bt_strat_card(self, strat: dict, bnh: float, sym: str, name: str):
-        total  = strat.get("total_return_pct", 0)
-        beat   = total > bnh
-        lbl    = strat["label"].replace("v2 ", "")
-
-        card = ctk.CTkFrame(self._bt_detail,
-                            fg_color="#0d2d0d" if beat else "#2d0d0d",
-                            corner_radius=10)
-        card.pack(fill="x", padx=12, pady=6)
-
-        hdr_row = ctk.CTkFrame(card, fg_color="transparent")
-        hdr_row.pack(fill="x", padx=14, pady=(10, 4))
-        ctk.CTkLabel(hdr_row, text=f"{'✅' if beat else '⚠️'} {lbl}",
-                     font=(self.ui_font, 13, "bold"),
-                     text_color=C_GREEN if beat else C_YELLOW
-                     ).pack(side="left")
-        ctk.CTkButton(hdr_row, text="ℹ 策略說明",
-                      font=(self.ui_font, 10),
-                      fg_color="#1a2a40", hover_color="#2a3a5a",
-                      text_color="#74b9ff", width=84, height=22,
-                      command=lambda l=strat["label"]: self._strategy_info_popup(l),
-                      ).pack(side="right")
-
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=(0, 6))
-
-        mdd    = strat.get("max_drawdown_pct")
-        sharpe = strat.get("sharpe")
-        wr     = strat.get("win_rate")
-
-        for label, val, clr in [
-            ("總報酬",  f"{total:+.2f}%",               C_GREEN if total >= 0 else C_RED),
-            ("MDD",     f"{mdd}%" if mdd else "N/A",     C_RED),
-            ("Sharpe",  str(sharpe) if sharpe else "N/A", C_YELLOW),
-            ("勝率",    f"{wr}%" if wr else "N/A",        C_WHITE),
-            ("交易次數", str(strat.get("trades", 0)),      C_WHITE),
-        ]:
-            col = ctk.CTkFrame(row, fg_color="transparent")
-            col.pack(side="left", padx=12)
-            ctk.CTkLabel(col, text=label,
-                         font=(self.ui_font, 10), text_color=C_GRAY).pack()
-            ctk.CTkLabel(col, text=val,
-                         font=(self.ui_font, 12, "bold"), text_color=clr).pack()
-
-        trades = strat.get("trade_log", [])
-        if trades:
-            ctk.CTkButton(
-                card,
-                text=f"📋 展開明細（{len(trades)} 筆交易）",
-                font=(self.ui_font, 11),
-                fg_color="#1a3a60", hover_color="#2d5a8e",
-                text_color="#74b9ff", height=28,
-                command=lambda t=trades, l=lbl: self._trade_popup(
-                    t, f"{sym.replace('.TW','')} {name}", l),
-            ).pack(anchor="w", padx=14, pady=(4, 12))
-        else:
-            ctk.CTkLabel(card, text="此區間無交易紀錄（信號未觸發）",
-                         font=(self.ui_font, 11), text_color=C_GRAY
-                         ).pack(anchor="w", padx=14, pady=(4, 12))
+                         text=f"⚠️ {sym.replace('.TW','')} 無 DCA 快取\n請先執行：python tw_scheduler.py --dca",
+                         font=(self.ui_font, 12), text_color=C_YELLOW).pack(pady=40)
 
     def _bt_dca_section(self, dca: dict, sym: str, name: str):
         period  = dca.get("period", "10年")
@@ -540,32 +447,6 @@ class TwStrategyApp(ctk.CTk):
 
     # ── 策略說明 ──────────────────────────────────────────────────────────────────
     _STRAT_DESC: dict[str, tuple[str, str]] = {
-        "v2 STRONG BUY策略": (
-            "v2 STRONG BUY 擇時策略（2年回測）",
-            "進場條件（三項同時成立）：\n"
-            "  • 60日回撤 ≤ -20%（從近期高點跌超 20%）\n"
-            "  • 價格 < AVWAP × b2（b2 < b1，更折扣的入場目標）\n"
-            "  • RSI ≤ rsi_sbuy（個股設定，更超賣門檻）\n\n"
-            "出場條件（三項同時成立）：\n"
-            "  • RSI ≥ rsi_sell（強勁動能）\n"
-            "  • 價格 ≥ AVWAP × s（超過目標倍率）\n"
-            "  • 價格 > MA20 × 1.15（高於 20 日均線 15%）\n\n"
-            "比 BUY 策略更保守，等更大跌幅才進場。\n"
-            "交易次數少，但每筆報酬通常較高。",
-        ),
-        "v2 BUY策略": (
-            "v2 BUY 擇時策略（2年回測）",
-            "進場條件（三項同時成立）：\n"
-            "  • 60日回撤 ≤ -10%（從近期高點跌超 10%）\n"
-            "  • 價格 < AVWAP × b1（低於錨定均量價折扣線）\n"
-            "  • RSI ≤ rsi_buy（個股設定，約 35–45）\n\n"
-            "出場條件（三項同時成立）：\n"
-            "  • RSI ≥ rsi_sell（強勁，約 65–75）\n"
-            "  • 價格 ≥ AVWAP × s\n"
-            "  • 價格 > MA20 × 1.15\n\n"
-            "AVWAP（Anchored VWAP）：從 60 日低點錨定計算\n"
-            "成交量加權均價，代表市場平均持倉成本。",
-        ),
         "v2 STRONG BUY DCA": (
             "v2 STRONG BUY 擇時加碼（10年 DCA）",
             "觸發條件（三項同時成立）：\n"
@@ -726,93 +607,6 @@ class TwStrategyApp(ctk.CTk):
                 trig = t.get("trigger", {})
                 vals += tuple(str(trig.get(k, "—")) for k in trigger_keys)
             tree.insert("", "end", values=vals)
-
-    def _trade_popup(self, trades: list[dict], stock: str, strategy: str):
-        import tkinter as tk
-        from tkinter import ttk as _ttk
-
-        win = tk.Toplevel(self)
-        win.title(f"{stock}  {strategy}")
-        win.geometry("720x500")
-        win.configure(bg="#0f1a30")
-        win.lift()
-
-        # 標題列
-        hdr = tk.Frame(win, bg="#0f1a30")
-        hdr.pack(fill="x", padx=10, pady=(8, 2))
-        tk.Label(hdr, text=f"{stock}  {strategy}",
-                 fg="#74b9ff", bg="#0f1a30",
-                 font=(self.ui_font, 12, "bold")).pack(side="left")
-        tk.Label(hdr, text=f"  共 {len(trades)} 筆",
-                 fg="#888888", bg="#0f1a30",
-                 font=("Consolas", 11)).pack(side="left")
-
-        # 勝率摘要
-        pnls   = [t.get("pnl_pct", 0) for t in trades]
-        wins   = sum(1 for p in pnls if p > 0)
-        avg    = sum(pnls) / len(pnls) if pnls else 0
-        wr_pct = wins / len(trades) * 100 if trades else 0
-
-        smr = tk.Frame(win, bg="#1a2a40")
-        smr.pack(fill="x", padx=10, pady=2)
-        tk.Label(smr,
-                 text=f"勝率  {wins}/{len(trades)} = {wr_pct:.0f}%    平均報酬  {avg:+.2f}%",
-                 fg="#fdcb6e", bg="#1a2a40",
-                 font=("Consolas", 10)).pack(side="left", padx=10, pady=4)
-
-        # 表格樣式
-        sty = _ttk.Style(win)
-        sty.theme_use("clam")
-        sty.configure("T.Treeview",
-                      background="#0d1b2a", foreground=C_WHITE,
-                      fieldbackground="#0d1b2a", rowheight=24,
-                      font=("Consolas", 11))
-        sty.configure("T.Treeview.Heading",
-                      background="#0a0f1a", foreground="#74b9ff",
-                      font=(self.ui_font, 11, "bold"))
-        sty.map("T.Treeview", background=[("selected", "#1c4f82")])
-
-        cols   = ("進場日", "出場日", "進場價", "出場價", "報酬%")
-        widths = (110, 110, 100, 100, 110)
-
-        wrap = tk.Frame(win, bg="#0f1a30")
-        wrap.pack(fill="both", expand=True, padx=10, pady=6)
-
-        tree = _ttk.Treeview(wrap, style="T.Treeview",
-                              columns=cols, show="headings", selectmode="browse")
-        for c, w in zip(cols, widths):
-            tree.heading(c, text=c)
-            tree.column(c, width=w, anchor="center")
-
-        tree.tag_configure("win",  foreground=C_GREEN)
-        tree.tag_configure("loss", foreground=C_RED)
-        tree.tag_configure("hold", foreground=C_YELLOW)
-
-        vsb = _ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-
-        for t in trades:
-            entry_d = t.get("entry_date", "?")
-            exit_d  = t.get("exit_date",  t.get("date", "?"))
-            entry_p = t.get("entry", 0)
-            exit_p  = t.get("exit",  0)
-            pnl     = t.get("pnl_pct", 0)
-
-            if exit_p == 0:
-                tag, exit_d, pnl_str = "hold", "持倉中", "持倉中"
-            else:
-                tag     = "win" if pnl > 0 else "loss"
-                pnl_str = f"{pnl:+.2f}%"
-
-            tree.insert("", "end", tags=(tag,), values=(
-                entry_d,
-                exit_d,
-                f"{entry_p:,.0f}",
-                f"{exit_p:,.0f}" if exit_p > 0 else "—",
-                pnl_str,
-            ))
 
     # ════════════════════════════════════════════════════════════════════
     # 掃描 Tab 邏輯

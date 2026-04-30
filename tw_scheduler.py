@@ -36,7 +36,7 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def run_once(run_backtest: bool = False):
+def run_once():
     if not is_trading_day():
         today = datetime.now(TZ).strftime('%Y-%m-%d (%a)')
         print(f"[跳過] {today} 非台灣交易日（週末或國定假日）")
@@ -44,7 +44,6 @@ def run_once(run_backtest: bool = False):
 
     from tw_screener import run_scan
     from tw_discord import send_scan_results, send_webhook, load_config as discord_cfg
-    from tw_backtest import run_backtest_all, build_backtest_embed, load_backtest_cache
     from tw_portfolio import run_portfolio_check, build_portfolio_embeds
 
     print(f"\n{'='*50}")
@@ -54,21 +53,10 @@ def run_once(run_backtest: bool = False):
     cfg = discord_cfg()
     webhook_url = cfg["discord"]["webhook_url"]
 
-    # 1. 回測（手動 --backtest 才重新跑，否則只讀快取）
-    bt_cache = load_backtest_cache()
-    if run_backtest:
-        print(f"\n--- 執行策略回測 ---")
-        bt_results = run_backtest_all()
-        bt_cache = {r["symbol"]: r for r in bt_results}
-        bt_embeds = [build_backtest_embed(r) for r in bt_results]
-        for i in range(0, len(bt_embeds), 10):
-            send_webhook({"embeds": bt_embeds[i:i+10]}, webhook_url)
-        print(f"回測摘要已推播至 Discord")
-
-    # 2. 信號掃描 + 買入/賣出推播（含回測佐證）
+    # 1. 信號掃描 + 買入/賣出推播
     print(f"\n--- 信號掃描 ---")
     results = run_scan()
-    send_scan_results(results, bt_cache=bt_cache)
+    send_scan_results(results)
 
     # 3. 持股追蹤（只在有操作信號時推播）
     print(f"\n--- 持股追蹤 ---")
@@ -188,4 +176,4 @@ if __name__ == "__main__":
             else:
                 print("無 outcome 資料")
     else:
-        run_once(run_backtest="--backtest" in sys.argv)
+        run_once()

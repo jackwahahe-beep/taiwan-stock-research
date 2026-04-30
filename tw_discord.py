@@ -76,8 +76,7 @@ def _dca_context_line(symbol: str, dca_cache: dict) -> str | None:
     return None
 
 
-def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None,
-                    dca_cache: dict | None = None) -> dict:
+def build_buy_embed(stock: dict, cfg: dict, dca_cache: dict | None = None) -> dict:
     budget   = cfg.get("trade_budget", 100000)
     price    = stock["price"]
     avwap    = stock.get("avwap", 0)
@@ -120,30 +119,6 @@ def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None,
                         "value": "大盤趨勢向下，此信號為 STRONG BUY 才推播，嚴控倉位",
                         "inline": False})
 
-    # 回測佐證（v2 BUY / STRONG BUY 策略）
-    if bt_summary:
-        strats = bt_summary.get("strategies", [])
-        bnh    = bt_summary.get("bnh_return_pct", 0)
-        bt_lines = []
-        for s in strats:
-            if s.get("trades", 0) == 0:
-                continue
-            wr    = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
-            mdd   = f"{s['max_drawdown_pct']}%" if s.get("max_drawdown_pct") is not None else "N/A"
-            beat  = "✅" if s["total_return_pct"] > bnh else "⚠️"
-            label = s["label"].replace("v2 ", "").replace("策略", "")
-            bt_lines.append(
-                f"{beat} **{label}** 報酬 `{s['total_return_pct']}%`  "
-                f"勝率 `{wr}`  交易 `{s['trades']}次`  MDD `{mdd}`"
-            )
-        if bt_lines:
-            bt_lines.append(f"📌 B&H 基準 `{bnh}%`（2年）")
-            fields.append({
-                "name":  "📊 歷史回測（v2，2年）",
-                "value": "\n".join(bt_lines),
-                "inline": False,
-            })
-
     # 10 年 DCA 建議策略
     dca_line = _dca_context_line(stock["symbol"], dca_cache or {})
     if dca_line:
@@ -164,8 +139,8 @@ def build_buy_embed(stock: dict, cfg: dict, bt_summary: dict | None = None,
 
 # ── 賣出推播 ───────────────────────────────────────────────────────────────────
 
-def build_sell_embed(stock: dict, cfg: dict, bt_summary: dict | None = None,
-                     dca_cache: dict | None = None, in_portfolio: bool = False) -> dict:
+def build_sell_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
+                     in_portfolio: bool = False) -> dict:
     from tw_screener import SIGNAL_CONFIG, _DEFAULT_CFG
 
     sym        = stock["symbol"]
@@ -208,30 +183,6 @@ def build_sell_embed(stock: dict, cfg: dict, bt_summary: dict | None = None,
          ),
          "inline": False},
     ]
-
-    # 回測佐証
-    if bt_summary:
-        strats   = bt_summary.get("strategies", [])
-        bnh      = bt_summary.get("bnh_return_pct", 0)
-        bt_lines = []
-        for s in strats:
-            if s.get("trades", 0) == 0:
-                continue
-            wr    = f"{s['win_rate']}%" if s["win_rate"] is not None else "N/A"
-            mdd   = f"{s['max_drawdown_pct']}%" if s.get("max_drawdown_pct") is not None else "N/A"
-            beat  = "✅" if s["total_return_pct"] > bnh else "⚠️"
-            label = s["label"].replace("v2 ", "").replace("策略", "")
-            bt_lines.append(
-                f"{beat} **{label}** 報酬 `{s['total_return_pct']}%`  "
-                f"勝率 `{wr}`  交易 `{s['trades']}次`  MDD `{mdd}`"
-            )
-        if bt_lines:
-            bt_lines.append(f"📌 B&H 基準 `{bnh}%`（2年）")
-            fields.append({
-                "name":  "📊 歷史回測（v2，2年）",
-                "value": "\n".join(bt_lines),
-                "inline": False,
-            })
 
     # 10 年 DCA 建議策略
     dca_line = _dca_context_line(sym, dca_cache or {})
@@ -412,8 +363,7 @@ def build_outcome_embed(outcome: dict) -> dict | None:
 
 # ── 主推播函數 ────────────────────────────────────────────────────────────────
 
-def send_scan_results(results: list[dict], bt_cache: dict | None = None,
-                      dca_cache: dict | None = None) -> None:
+def send_scan_results(results: list[dict], dca_cache: dict | None = None) -> None:
     cfg         = load_config()
     webhook_url = cfg["discord"]["webhook_url"]
     portfolio_syms = _portfolio_symbols(cfg)
@@ -441,13 +391,11 @@ def send_scan_results(results: list[dict], bt_cache: dict | None = None,
             # 風險模式：只推 STRONG BUY
             if market_mode == "RISK" and "STRONG BUY" not in types:
                 continue
-            bt = (bt_cache or {}).get(r["symbol"])
-            buy_embeds.append(build_buy_embed(r, cfg, bt, dca_cache=dca_cache))
+            buy_embeds.append(build_buy_embed(r, cfg, dca_cache=dca_cache))
 
         # 賣出推播（持股 + 非持股觀察）
         if "SELL" in types:
-            bt = (bt_cache or {}).get(r["symbol"])
-            sell_embeds.append(build_sell_embed(r, cfg, bt, dca_cache=dca_cache,
+            sell_embeds.append(build_sell_embed(r, cfg, dca_cache=dca_cache,
                                                 in_portfolio=in_portfolio))
 
     # 先發市場模式 header

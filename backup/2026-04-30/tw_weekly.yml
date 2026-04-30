@@ -1,0 +1,41 @@
+name: 台股週報 + DCA 回測
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # 每週日 10:00 台灣時間 (UTC+8 → 02:00 UTC)
+  workflow_dispatch:       # 手動觸發
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 還原回測快取
+        uses: actions/cache@v4
+        with:
+          path: cache/
+          key: tw-cache-${{ github.run_id }}
+          restore-keys: |
+            tw-cache-
+
+      - name: 10年 DCA 回測 + 推播
+        run: python tw_scheduler.py --dca
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: 週報推播
+        run: python tw_scheduler.py --weekly
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

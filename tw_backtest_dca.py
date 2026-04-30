@@ -181,7 +181,7 @@ def _run_dca(
         "cagr_pct":          round(cagr, 2),
         "max_drawdown_pct":  round(max_dd, 2),
         "n_transactions":    len(transactions),
-        "last_tx":           transactions[-3:] if transactions else [],
+        "transactions":      transactions,
     }
 
 

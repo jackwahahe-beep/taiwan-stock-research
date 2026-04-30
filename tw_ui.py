@@ -87,6 +87,14 @@ def _load_backtest_cache() -> dict:
     return {r["symbol"]: r for r in data}
 
 
+def _load_dca_cache() -> dict:
+    files = sorted(_glob.glob(str(CACHE_DIR / "dca_backtest_*.json")), reverse=True)
+    if not files:
+        return {}
+    data = json.loads(Path(files[0]).read_text(encoding="utf-8"))
+    return {r["symbol"]: r for r in data}
+
+
 def _build_scan_rows(scan_records: list[dict], cfg: dict) -> list[dict]:
     from tw_screener import SIGNAL_CONFIG, _DEFAULT_CFG
 
@@ -317,8 +325,9 @@ class TwStrategyApp(ctk.CTk):
         self._bt_detail.pack(fill="both", expand=True)
 
         # 載入快取 & 填充股票清單
-        self._bt_cache = _load_backtest_cache()
-        self._bt_btns  = {}
+        self._bt_cache  = _load_backtest_cache()
+        self._dca_cache = _load_dca_cache()
+        self._bt_btns   = {}
 
         try:
             cfg = _load_config()
@@ -385,6 +394,16 @@ class TwStrategyApp(ctk.CTk):
         for strat in bt.get("strategies", []):
             self._bt_strat_card(strat, bnh, sym, name)
 
+        # 10Y DCA 區塊
+        dca = self._dca_cache.get(sym)
+        if dca:
+            self._bt_dca_section(dca, sym, name)
+        else:
+            ctk.CTkLabel(self._bt_detail,
+                         text="⚠️ 無 10年DCA快取　請先執行：python tw_scheduler.py --dca",
+                         font=(self.ui_font, 11), text_color=C_GRAY
+                         ).pack(anchor="w", padx=16, pady=(8, 4))
+
     def _bt_strat_card(self, strat: dict, bnh: float, sym: str, name: str):
         total  = strat.get("total_return_pct", 0)
         beat   = total > bnh
@@ -436,6 +455,134 @@ class TwStrategyApp(ctk.CTk):
             ctk.CTkLabel(card, text="此區間無交易紀錄（信號未觸發）",
                          font=(self.ui_font, 11), text_color=C_GRAY
                          ).pack(anchor="w", padx=14, pady=(4, 12))
+
+    def _bt_dca_section(self, dca: dict, sym: str, name: str):
+        period  = dca.get("period", "10年")
+        budget  = dca.get("annual_budget", 100_000)
+
+        sep = ctk.CTkFrame(self._bt_detail, fg_color="#2a2a4a", height=2, corner_radius=0)
+        sep.pack(fill="x", padx=12, pady=(12, 6))
+
+        ctk.CTkLabel(self._bt_detail,
+                     text=f"📊 10年 DCA 回測　{period}　每年注資 NT${budget:,}",
+                     font=(self.ui_font, 13, "bold"), text_color=C_BLUE
+                     ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        # B&H DCA 基準
+        bnh_strat = next((s for s in dca.get("strategies", []) if "B&H" in s["label"]), None)
+        bnh_cagr  = bnh_strat["cagr_pct"] if bnh_strat else 0
+
+        for strat in dca.get("strategies", []):
+            cagr   = strat.get("cagr_pct", 0)
+            total  = strat.get("total_return_pct", 0)
+            mdd    = strat.get("max_drawdown_pct", 0)
+            fval   = strat.get("final_value", 0)
+            inv    = strat.get("total_invested", 0)
+            ntx    = strat.get("n_transactions", 0)
+            lbl    = strat["label"]
+            beat   = cagr > bnh_cagr and "B&H" not in lbl
+
+            card = ctk.CTkFrame(self._bt_detail,
+                                fg_color="#0d2d0d" if beat else "#0d1a2d",
+                                corner_radius=10)
+            card.pack(fill="x", padx=12, pady=4)
+
+            flag = "✅" if beat else ("📌" if "B&H" in lbl else "⚠️")
+            ctk.CTkLabel(card, text=f"{flag} {lbl}",
+                         font=(self.ui_font, 12, "bold"),
+                         text_color=C_STRONG if "B&H" in lbl else (C_GREEN if beat else C_YELLOW)
+                         ).pack(anchor="w", padx=14, pady=(8, 4))
+
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=14, pady=(0, 6))
+            for label, val, clr in [
+                ("CAGR",   f"{cagr:.1f}%",              C_GREEN if cagr >= bnh_cagr else C_YELLOW),
+                ("總報酬", f"{total:+.1f}%",             C_GREEN if total > 0 else C_RED),
+                ("MDD",    f"{mdd:.1f}%",                C_RED),
+                ("終值",   f"NT${fval:,.0f}",            C_WHITE),
+                ("注資",   f"NT${inv:,.0f}",             C_GRAY),
+                ("交易次", str(ntx),                      C_GRAY),
+            ]:
+                col = ctk.CTkFrame(row, fg_color="transparent")
+                col.pack(side="left", padx=10)
+                ctk.CTkLabel(col, text=label,
+                             font=(self.ui_font, 10), text_color=C_GRAY).pack()
+                ctk.CTkLabel(col, text=val,
+                             font=(self.ui_font, 11, "bold"), text_color=clr).pack()
+
+            txs = strat.get("transactions", strat.get("last_tx", []))
+            if txs:
+                ctk.CTkButton(
+                    card,
+                    text=f"📋 展開注資明細（{len(txs)} 筆）",
+                    font=(self.ui_font, 11),
+                    fg_color="#1a3a60", hover_color="#2d5a8e",
+                    text_color="#74b9ff", height=26,
+                    command=lambda t=txs, l=lbl: self._dca_popup(
+                        t, f"{sym.replace('.TW','')} {name}", l),
+                ).pack(anchor="w", padx=14, pady=(2, 10))
+
+    def _dca_popup(self, transactions: list[dict], stock: str, strategy: str):
+        import tkinter as tk
+        from tkinter import ttk as _ttk
+
+        win = tk.Toplevel(self)
+        win.title(f"{stock}  {strategy}")
+        win.geometry("640x480")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        hdr = tk.Frame(win, bg="#0f1a30")
+        hdr.pack(fill="x", padx=10, pady=(8, 2))
+        tk.Label(hdr, text=f"{stock}  {strategy}",
+                 fg="#74b9ff", bg="#0f1a30",
+                 font=(self.ui_font, 12, "bold")).pack(side="left")
+        tk.Label(hdr, text=f"  共 {len(transactions)} 筆注資",
+                 fg="#888", bg="#0f1a30",
+                 font=("Consolas", 11)).pack(side="left")
+
+        total_cost = sum(t.get("cost", 0) for t in transactions)
+        smr = tk.Frame(win, bg="#1a2a40")
+        smr.pack(fill="x", padx=10, pady=2)
+        tk.Label(smr, text=f"總注資  NT${total_cost:,.0f}",
+                 fg="#fdcb6e", bg="#1a2a40",
+                 font=("Consolas", 10)).pack(side="left", padx=10, pady=4)
+
+        sty = _ttk.Style(win)
+        sty.theme_use("clam")
+        sty.configure("D.Treeview",
+                      background="#0d1b2a", foreground=C_WHITE,
+                      fieldbackground="#0d1b2a", rowheight=24,
+                      font=("Consolas", 11))
+        sty.configure("D.Treeview.Heading",
+                      background="#0a0f1a", foreground="#74b9ff",
+                      font=(self.ui_font, 11, "bold"))
+        sty.map("D.Treeview", background=[("selected", "#1c4f82")])
+
+        cols   = ("注資日期", "買入價格", "買入股數", "注資金額")
+        widths = (130, 110, 110, 130)
+
+        wrap = tk.Frame(win, bg="#0f1a30")
+        wrap.pack(fill="both", expand=True, padx=10, pady=6)
+
+        tree = _ttk.Treeview(wrap, style="D.Treeview",
+                              columns=cols, show="headings", selectmode="browse")
+        for c, w in zip(cols, widths):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor="center")
+
+        vsb = _ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        for t in transactions:
+            tree.insert("", "end", values=(
+                t.get("date", "?"),
+                f"{t.get('price', 0):,.2f}",
+                f"{int(t.get('shares', 0)):,}",
+                f"NT${t.get('cost', 0):,.0f}",
+            ))
 
     def _trade_popup(self, trades: list[dict], stock: str, strategy: str):
         import tkinter as tk

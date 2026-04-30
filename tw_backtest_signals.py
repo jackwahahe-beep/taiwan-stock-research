@@ -19,6 +19,7 @@ TZ        = ZoneInfo("Asia/Taipei")
 START_DATE    = "2015-01-01"
 END_DATE      = "2025-12-31"
 ANNUAL_BUDGET = 100_000   # NT$ 每年注資金額（可由呼叫方覆寫）
+MAX_INJECT_YEARS = 10     # 最多注資年數（避免跨 11 個日曆年超過預期）
 SBUY_MULT     = 1.5       # STRONG BUY 單筆投入倍率（相對 ANNUAL_BUDGET）
 TRIM_PROFIT   = 15.0      # % 單筆獲利達此門檻 → TRIM 出場
 
@@ -127,19 +128,22 @@ def _simulate(sig: pd.DataFrame,
     LOT_BUY  = annual_budget
     LOT_SBUY = annual_budget * SBUY_MULT
 
-    cash:          float       = 0.0
-    total_injected: float      = 0.0
-    open_lots:     list[dict]  = []
-    trades:        list[dict]  = []
-    prev_sig       = "HOLD"
-    current_year   = None
+    cash:           float       = 0.0
+    total_injected: float       = 0.0
+    inject_count:   int         = 0
+    open_lots:      list[dict]  = []
+    trades:         list[dict]  = []
+    prev_sig        = "HOLD"
+    current_year    = None
 
     for dt, row in sig.iterrows():
         yr = dt.year
         if yr != current_year:
-            cash           += annual_budget
-            total_injected += annual_budget
-            current_year    = yr
+            current_year = yr
+            if inject_count < MAX_INJECT_YEARS:
+                cash           += annual_budget
+                total_injected += annual_budget
+                inject_count   += 1
 
         price    = float(row["close"])
         rsi      = float(row["rsi"])
@@ -295,11 +299,15 @@ def run_signal_backtest(symbol: str, name: str,
     bnh_cost   = 0.0
     bnh_injected = 0.0
     bnh_txs: list[dict] = []
+    bnh_inject_count = 0
     for yr in range(sig.index[0].year, sig.index[-1].year + 1):
+        if bnh_inject_count >= MAX_INJECT_YEARS:
+            break
         yr_data = sig[sig.index.year == yr]
         if yr_data.empty:
             continue
         bnh_injected += annual_budget
+        bnh_inject_count += 1
         ep    = float(yr_data["close"].iloc[0])
         bought = int(annual_budget // ep)
         if bought > 0:

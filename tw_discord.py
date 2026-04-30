@@ -273,8 +273,35 @@ def build_market_mode_embed(results: list[dict]) -> dict | None:
         lines.append("🟢🟢 強力買入：" + "、".join(r["symbol"].replace(".TW","") for r in strong_buys))
     if buys:
         lines.append("🟢 買入：" + "、".join(r["symbol"].replace(".TW","") for r in buys))
+
+    # 賣出：邊緣觸發——區分「今日新觸發」vs「持續中（昨日已有）」
     if sells:
-        lines.append("🔴 賣出：" + "、".join(r["symbol"].replace(".TW","") for r in sells))
+        yesterday_sell_syms: set[str] = set()
+        try:
+            import json as _json
+            from datetime import timedelta
+            ydate  = (datetime.now(TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+            yfile  = BASE_DIR / "cache" / f"scan_{ydate}.json"
+            if not yfile.exists():
+                ydate2 = (datetime.now(TZ) - timedelta(days=3)).strftime("%Y-%m-%d")
+                yfile  = BASE_DIR / "cache" / f"scan_{ydate2}.json"
+            if yfile.exists():
+                yrecs = _json.loads(yfile.read_text(encoding="utf-8"))
+                yesterday_sell_syms = {
+                    r["symbol"] for r in yrecs
+                    if any(s["type"] == "SELL" for s in r.get("signals", []))
+                }
+        except Exception:
+            pass
+
+        new_sells  = [r for r in sells if r["symbol"] not in yesterday_sell_syms]
+        cont_sells = [r for r in sells if r["symbol"] in yesterday_sell_syms]
+
+        if new_sells:
+            lines.append("🔴 **新賣出**：" + "、".join(r["symbol"].replace(".TW","") for r in new_sells))
+        if cont_sells:
+            lines.append("🔴 賣出（持續中）：" + "、".join(r["symbol"].replace(".TW","") for r in cont_sells))
+
     if not strong_buys and not buys and not sells:
         lines.append("今日無明確買入/賣出信號")
 

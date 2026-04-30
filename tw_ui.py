@@ -1382,12 +1382,20 @@ class TwStrategyApp(ctk.CTk):
         ctk.CTkLabel(bar, text="📋 跟單回測（2015–2025）",
                      font=(self.ui_font, 13, "bold"), text_color=C_BLUE
                      ).pack(side="left", padx=16, pady=12)
-        ctk.CTkLabel(bar, text="模擬嚴格按 BUY / STRONG BUY / SELL 信號操作，逐筆記錄損益",
+        ctk.CTkLabel(bar, text="模擬每年注資，按 BUY / STRONG BUY / SELL 信號操作，逐筆記錄損益",
                      font=(self.ui_font, 10), text_color=C_GRAY
                      ).pack(side="left", padx=4)
         self._sbt_status = ctk.CTkLabel(bar, text="",
                                         font=(self.ui_font, 10), text_color=C_YELLOW)
         self._sbt_status.pack(side="right", padx=12)
+        # 年度注資金額輸入
+        ctk.CTkLabel(bar, text="每年注資 NT$",
+                     font=(self.ui_font, 10), text_color=C_GRAY
+                     ).pack(side="right", padx=(8, 2))
+        self._sbt_budget_var = ctk.StringVar(value="100000")
+        ctk.CTkEntry(bar, textvariable=self._sbt_budget_var,
+                     width=90, height=28, font=(self.ui_font, 11)
+                     ).pack(side="right", padx=(0, 4))
 
         body = ctk.CTkFrame(tab, fg_color=BG, corner_radius=0)
         body.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1483,10 +1491,17 @@ class TwStrategyApp(ctk.CTk):
         ctk.CTkLabel(self._sbt_detail, text="資料拉取中，請稍候…",
                      font=(self.ui_font, 12), text_color=C_YELLOW).pack(pady=60)
 
+        try:
+            annual_budget = float(self._sbt_budget_var.get().replace(",", ""))
+            if annual_budget <= 0:
+                annual_budget = 100_000
+        except ValueError:
+            annual_budget = 100_000
+
         def _bg():
             try:
                 from tw_backtest_signals import run_signal_backtest
-                result = run_signal_backtest(sym, name)
+                result = run_signal_backtest(sym, name, annual_budget=annual_budget)
                 if "error" not in result:
                     self._sbt_cache[sym] = result
                     if sym in self._sbt_btns:
@@ -1523,29 +1538,30 @@ class TwStrategyApp(ctk.CTk):
         # ── 信號統計 + 回測設定 ───────────────────────────────────────
         info = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=6)
         info.pack(fill="x", padx=12, pady=(0, 8))
+        ab = p.get("annual_budget", 100_000)
         for txt, clr in [
             (f"STRONG BUY ×{sc.get('STRONG BUY',0)}", C_STRONG),
             (f"  BUY ×{sc.get('BUY',0)}", C_GREEN),
             (f"  SELL ×{sc.get('SELL',0)}", C_RED),
-            (f"   │  BUY預算 NT${p.get('budget',0)//10000}萬  "
-             f"SBUY預算 NT${p.get('sbuy_budget',0)//10000}萬  "
-             f"最多{p.get('max_lots',3)}筆同時  "
+            (f"   │  每年注資 NT${ab:,.0f}  "
+             f"SBUY={p.get('sbuy_mult',1.5):.1f}x  "
              f"TRIM≥{p.get('trim_pct',15):.0f}%", C_GRAY),
         ]:
             ctk.CTkLabel(info, text=txt, font=(self.ui_font, 10),
                          text_color=clr).pack(side="left", padx=6, pady=5)
 
         # ── 摘要比較表 ────────────────────────────────────────────────
-        ctk.CTkLabel(self._sbt_detail, text="策略摘要比較",
+        annual_bgt = bnh.get("annual_budget", p.get("annual_budget", 100_000))
+        ctk.CTkLabel(self._sbt_detail,
+                     text=f"策略摘要比較（每年注資 NT${annual_bgt:,.0f}，B&H = 年初無條件買入）",
                      font=(self.ui_font, 11, "bold"), text_color=C_BLUE
                      ).pack(anchor="w", padx=16, pady=(4, 2))
 
         tbl = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=8)
         tbl.pack(fill="x", padx=12, pady=(0, 10))
 
-        headers = ["策略", "交易次", "勝率", "總投入", "總損益", "報酬率",
-                   "平均持有", "最佳%", "最差%", "vs B&H"]
-        widths  = [155, 60, 65, 100, 110, 75, 75, 65, 65, 70]
+        headers = ["策略", "交易次", "勝率", "總注資", "損益NT$", "報酬%", "CAGR%", "vs B&H"]
+        widths  = [165, 60, 65, 110, 110, 80, 75, 70]
 
         hdr_row = ctk.CTkFrame(tbl, fg_color="#0f1a30")
         hdr_row.pack(fill="x", padx=2, pady=(2, 0))
@@ -1554,54 +1570,95 @@ class TwStrategyApp(ctk.CTk):
                          text_color="#74b9ff", width=w, anchor="center"
                          ).pack(side="left")
 
-        # B&H 基準列
+        # B&H 年度注資基準列
         bnh_row = ctk.CTkFrame(tbl, fg_color="#1a1a0d")
         bnh_row.pack(fill="x", padx=2, pady=1)
-        bnh_ret = bnh.get("return_pct", 0)
+        bnh_ret  = bnh.get("return_pct", 0)
+        bnh_cagr = bnh.get("cagr_pct", 0)
         for val, w, clr in [
-            ("📌 B&H 基準",               155, C_YELLOW),
-            ("1",                          60,  C_GRAY),
-            ("—",                          65,  C_GRAY),
-            (f"NT${bnh.get('cost',0):,}",  100, C_GRAY),
-            (f"NT${bnh.get('pnl',0):+,}",  110, C_GREEN if bnh.get("pnl",0)>=0 else C_RED),
-            (f"{bnh_ret:+.1f}%",            75, C_GREEN if bnh_ret>=0 else C_RED),
-            (f"{bnh.get('hold_days',0)}天", 75,  C_GRAY),
-            ("—",                           65,  C_GRAY),
-            ("—",                           65,  C_GRAY),
-            ("基準",                         70,  C_YELLOW),
+            ("📌 B&H（年初買入）",                 165, C_YELLOW),
+            (str(len(bnh.get("transactions", []))), 60,  C_GRAY),
+            ("—",                                    65,  C_GRAY),
+            (f"NT${bnh.get('total_injected',0):,.0f}", 110, C_GRAY),
+            (f"NT${bnh.get('pnl',0):+,.0f}",        110, C_GREEN if bnh.get("pnl",0)>=0 else C_RED),
+            (f"{bnh_ret:+.1f}%",                     80, C_GREEN if bnh_ret>=0 else C_RED),
+            (f"{bnh_cagr:+.1f}%",                    75, C_GREEN if bnh_cagr>=0 else C_RED),
+            ("基準",                                  70, C_YELLOW),
         ]:
             ctk.CTkLabel(bnh_row, text=val, font=(self.ui_font, 10),
                          text_color=clr, width=w, anchor="center"
                          ).pack(side="left")
 
-        # 各策略列
+        # 各信號策略列
         for m in modes:
             s    = m["stats"]
             beat = s["beats_bnh"]
             ret  = s["return_pct"]
             pnl  = s["total_pnl"]
+            cagr = s.get("cagr_pct", 0)
             row_bg = "#0d2d0d" if beat else "transparent"
             dr = ctk.CTkFrame(tbl, fg_color=row_bg)
             dr.pack(fill="x", padx=2, pady=1)
-            tag  = "✅" if beat else "❌"
+            tag  = "✅" if beat else ("⬜" if s["n_trades"]==0 else "❌")
             pclr = C_GREEN if pnl >= 0 else C_RED
             rclr = C_GREEN if ret >= 0 else C_RED
             wclr = C_GREEN if s["win_rate"] >= 60 else (C_YELLOW if s["win_rate"] >= 40 else C_RED)
             for val, w, clr in [
-                (f"{tag} {m['label']}",        155, C_GREEN if beat else C_YELLOW),
-                (str(s["n_trades"]),             60,  C_GRAY),
-                (f"{s['win_rate']:.0f}%",        65,  wclr),
-                (f"NT${s['total_invested']:,.0f}",100, C_GRAY),
-                (f"NT${pnl:+,.0f}",              110, pclr),
-                (f"{ret:+.1f}%",                 75,  rclr),
-                (f"{s['avg_hold_days']}天",       75,  C_GRAY),
-                (f"{s['best_pct']:+.1f}%",        65,  C_GREEN),
-                (f"{s['worst_pct']:+.1f}%",       65,  C_RED),
-                ("勝" if beat else "輸",           70,  C_GREEN if beat else C_RED),
+                (f"{tag} {m['label']}",              165, C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_YELLOW)),
+                (str(s["n_trades"]),                  60,  C_GRAY),
+                (f"{s['win_rate']:.0f}%" if s["n_trades"] else "—", 65, wclr),
+                (f"NT${s['total_injected']:,.0f}",   110, C_GRAY),
+                (f"NT${pnl:+,.0f}",                  110, pclr),
+                (f"{ret:+.1f}%",                      80,  rclr),
+                (f"{cagr:+.1f}%",                     75,  C_GREEN if cagr>=0 else C_RED),
+                ("勝" if beat else ("—" if s["n_trades"]==0 else "輸"), 70, C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_RED)),
             ]:
                 ctk.CTkLabel(dr, text=val, font=(self.ui_font, 10),
                              text_color=clr, width=w, anchor="center"
                              ).pack(side="left")
+
+        # ── DCA 定期定額策略列（從快取讀取）────────────────────────────
+        try:
+            from tw_backtest_dca import load_dca_cache
+            dca_list = load_dca_cache()
+            dca_row  = next((r for r in dca_list if r.get("symbol") == sym), None)
+        except Exception:
+            dca_row = None
+
+        if dca_row:
+            sep = ctk.CTkFrame(tbl, fg_color="#1a1a2d")
+            sep.pack(fill="x", padx=2, pady=(4, 0))
+            ctk.CTkLabel(sep, text="── DCA 定期定額策略（參考對比）──",
+                         font=(self.ui_font, 9), text_color="#9090c0",
+                         width=sum(widths), anchor="center"
+                         ).pack(side="left")
+
+            for ds in dca_row.get("strategies", []):
+                d_ret  = ds.get("total_return_pct", 0) or 0
+                d_cagr = ds.get("cagr_pct", 0) or 0
+                d_pnl  = ds.get("profit", 0) or 0
+                d_inv  = ds.get("total_invested", 0) or 0
+                d_ntx  = ds.get("n_transactions", 0) or 0
+                d_lbl  = ds.get("label", "DCA")
+                beat_d = d_ret > bnh_ret
+                dr = ctk.CTkFrame(tbl, fg_color="#0a0a1d")
+                dr.pack(fill="x", padx=2, pady=1)
+                tag_d  = "✅" if beat_d else "❌"
+                pclr   = C_GREEN if d_pnl >= 0 else C_RED
+                rclr   = C_GREEN if d_ret >= 0 else C_RED
+                for val, w, clr in [
+                    (f"{tag_d} {d_lbl}",        165, C_GREEN if beat_d else "#a0a0c0"),
+                    (str(d_ntx),                  60,  C_GRAY),
+                    ("—",                          65,  C_GRAY),
+                    (f"NT${d_inv:,.0f}",          110, C_GRAY),
+                    (f"NT${d_pnl:+,.0f}",         110, pclr),
+                    (f"{d_ret:+.1f}%",             80,  rclr),
+                    (f"{d_cagr:+.1f}%",            75,  C_GREEN if d_cagr>=0 else C_RED),
+                    ("勝" if beat_d else "輸",      70,  C_GREEN if beat_d else C_RED),
+                ]:
+                    ctk.CTkLabel(dr, text=val, font=(self.ui_font, 10),
+                                 text_color=clr, width=w, anchor="center"
+                                 ).pack(side="left")
 
         # ── 各策略卡片（含交易明細按鈕）─────────────────────────────
         for m in modes:
@@ -1646,15 +1703,17 @@ class TwStrategyApp(ctk.CTk):
             row.pack(fill="x", padx=14, pady=(0, 8))
             ret  = s["return_pct"]
             pnl  = s["total_pnl"]
+            cagr = s.get("cagr_pct", 0)
             for label, val, clr in [
-                ("報酬率",   f"{ret:+.1f}%",            C_GREEN if ret>=0 else C_RED),
-                ("總損益",   f"NT${pnl:+,.0f}",          C_GREEN if pnl>=0 else C_RED),
-                ("勝率",     f"{s['win_rate']:.0f}%",    C_GREEN if s['win_rate']>=60 else C_YELLOW),
-                ("交易次",   str(s["n_trades"]),          C_GRAY),
-                ("平均持有", f"{s['avg_hold_days']}天",   C_GRAY),
-                ("最佳",     f"{s['best_pct']:+.1f}%",   C_GREEN),
-                ("最差",     f"{s['worst_pct']:+.1f}%",  C_RED),
-                ("期末未結", str(s["n_open_end"]),         C_YELLOW if s["n_open_end"] else C_GRAY),
+                ("報酬率",   f"{ret:+.1f}%",              C_GREEN if ret>=0 else C_RED),
+                ("CAGR",    f"{cagr:+.1f}%",              C_GREEN if cagr>=0 else C_RED),
+                ("總損益",   f"NT${pnl:+,.0f}",            C_GREEN if pnl>=0 else C_RED),
+                ("勝率",     f"{s['win_rate']:.0f}%",      C_GREEN if s['win_rate']>=60 else C_YELLOW),
+                ("交易次",   str(s["n_trades"]),            C_GRAY),
+                ("平均持有", f"{s['avg_hold_days']}天",     C_GRAY),
+                ("最佳",     f"{s['best_pct']:+.1f}%",     C_GREEN),
+                ("最差",     f"{s['worst_pct']:+.1f}%",    C_RED),
+                ("期末未結", str(s["n_open_end"]),           C_YELLOW if s["n_open_end"] else C_GRAY),
             ]:
                 col = ctk.CTkFrame(row, fg_color="transparent")
                 col.pack(side="left", padx=8)

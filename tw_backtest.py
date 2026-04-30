@@ -92,6 +92,7 @@ def _run_backtest_v2(
     cash        = init_cash
     position    = 0.0
     entry_price = 0.0
+    entry_date  = ""
     trades      = []
     pv_list     = []   # daily portfolio value for MDD + Sharpe
 
@@ -122,15 +123,17 @@ def _run_backtest_v2(
             if shares > 0:
                 position    = shares
                 entry_price = price
+                entry_date  = close.index[i].date().isoformat()
                 cash       -= shares * price
 
         elif position > 0 and is_sell:
             pnl_pct = (price - entry_price) / entry_price * 100
             trades.append({
-                "entry":   round(entry_price, 2),
-                "exit":    round(price, 2),
-                "pnl_pct": round(pnl_pct, 2),
-                "date":    close.index[i].date().isoformat(),
+                "entry_date": entry_date,
+                "date":       close.index[i].date().isoformat(),
+                "entry":      round(entry_price, 2),
+                "exit":       round(price, 2),
+                "pnl_pct":    round(pnl_pct, 2),
             })
             cash    += position * price
             position = 0
@@ -172,7 +175,7 @@ def _run_backtest_v2(
         "max_loss_pct":     round(min(pnls), 2),
         "max_drawdown_pct": mdd,
         "sharpe":           sharpe,
-        "trade_log":        trades[-5:],
+        "trade_log":        trades,
     }
 
 

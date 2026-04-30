@@ -93,10 +93,12 @@ def _run_dca(
     symbol: str,
     allow_buy: pd.Series | None = None,
     label: str = "DCA",
+    indicator_series: dict | None = None,
 ) -> dict:
     """
     通用 DCA 引擎。
-    allow_buy: 每日布林 Series；None → 無條件（B&H DCA）
+    allow_buy:        每日布林 Series；None → 無條件（B&H DCA）
+    indicator_series: 用於記錄觸發條件的指標 Series 字典（key=欄位名，value=pd.Series）
     若當日不允許，資金累積到下次允許日。
     """
     close = close.dropna()
@@ -140,12 +142,27 @@ def _run_dca(
                 shares_held  += bought
                 cash_reserve -= cost
                 invested_total += cost
-                transactions.append({
+                tx: dict = {
                     "date":   dt.date().isoformat(),
                     "price":  round(price, 2),
                     "shares": bought,
                     "cost":   round(cost, 0),
-                })
+                }
+                if indicator_series:
+                    trigger = {}
+                    for k, ser in indicator_series.items():
+                        if isinstance(ser, pd.Series):
+                            v = ser.loc[dt] if dt in ser.index else None
+                            if v is not None:
+                                if isinstance(v, float) and np.isnan(v):
+                                    pass
+                                elif isinstance(v, (int, float)):
+                                    trigger[k] = round(float(v), 1)
+                                else:
+                                    trigger[k] = str(v)
+                    if trigger:
+                        tx["trigger"] = trigger
+                transactions.append(tx)
 
     final_price   = float(close.iloc[-1])
     final_value   = shares_held * final_price + cash_reserve
@@ -245,6 +262,9 @@ def run_dca_backtest(symbol: str, name: str, cfg: dict,
     # bnh_dca 旗標：超強趨勢股不做擇時，全部策略都用 B&H
     is_bnh_only = stock_cfg.get("bnh_dca", False)
 
+    vs_b1 = ((close / b1) - 1) * 100
+    vs_b2 = ((close / b2) - 1) * 100
+
     if is_bnh_only:
         strategies = [
             _run_dca(close, high, low, volume, symbol,
@@ -253,13 +273,16 @@ def run_dca_backtest(symbol: str, name: str, cfg: dict,
     else:
         strategies = [
             _run_dca(close, high, low, volume, symbol,
-                     allow_buy=None,        label="B&H DCA（無條件）"),
+                     allow_buy=None, label="B&H DCA（無條件）"),
             _run_dca(close, high, low, volume, symbol,
-                     allow_buy=buy_filter,  label="v2 BUY DCA"),
+                     allow_buy=buy_filter, label="v2 BUY DCA",
+                     indicator_series={"DD%": dd * 100, "RSI": rsi, "vs_b1%": vs_b1}),
             _run_dca(close, high, low, volume, symbol,
-                     allow_buy=sbuy_filter, label="v2 STRONG BUY DCA"),
+                     allow_buy=sbuy_filter, label="v2 STRONG BUY DCA",
+                     indicator_series={"DD%": dd * 100, "RSI": rsi, "vs_b2%": vs_b2}),
             _run_dca(close, high, low, volume, symbol,
-                     allow_buy=market_dip,  label="市場警戒逆向加碼"),
+                     allow_buy=market_dip, label="市場警戒逆向加碼",
+                     indicator_series={"市場模式": mode_aligned, "DD%": dd * 100}),
         ]
 
     crashes = _crash_performance(close)

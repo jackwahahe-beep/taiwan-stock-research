@@ -414,10 +414,18 @@ class TwStrategyApp(ctk.CTk):
                             corner_radius=10)
         card.pack(fill="x", padx=12, pady=6)
 
-        ctk.CTkLabel(card, text=f"{'✅' if beat else '⚠️'} {lbl}",
+        hdr_row = ctk.CTkFrame(card, fg_color="transparent")
+        hdr_row.pack(fill="x", padx=14, pady=(10, 4))
+        ctk.CTkLabel(hdr_row, text=f"{'✅' if beat else '⚠️'} {lbl}",
                      font=(self.ui_font, 13, "bold"),
                      text_color=C_GREEN if beat else C_YELLOW
-                     ).pack(anchor="w", padx=14, pady=(10, 4))
+                     ).pack(side="left")
+        ctk.CTkButton(hdr_row, text="ℹ 策略說明",
+                      font=(self.ui_font, 10),
+                      fg_color="#1a2a40", hover_color="#2a3a5a",
+                      text_color="#74b9ff", width=84, height=22,
+                      command=lambda l=strat["label"]: self._strategy_info_popup(l),
+                      ).pack(side="right")
 
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=14, pady=(0, 6))
@@ -488,10 +496,18 @@ class TwStrategyApp(ctk.CTk):
             card.pack(fill="x", padx=12, pady=4)
 
             flag = "✅" if beat else ("📌" if "B&H" in lbl else "⚠️")
-            ctk.CTkLabel(card, text=f"{flag} {lbl}",
+            dca_hdr = ctk.CTkFrame(card, fg_color="transparent")
+            dca_hdr.pack(fill="x", padx=14, pady=(8, 4))
+            ctk.CTkLabel(dca_hdr, text=f"{flag} {lbl}",
                          font=(self.ui_font, 12, "bold"),
                          text_color=C_STRONG if "B&H" in lbl else (C_GREEN if beat else C_YELLOW)
-                         ).pack(anchor="w", padx=14, pady=(8, 4))
+                         ).pack(side="left")
+            ctk.CTkButton(dca_hdr, text="ℹ 策略說明",
+                          font=(self.ui_font, 10),
+                          fg_color="#1a2a40", hover_color="#2a3a5a",
+                          text_color="#74b9ff", width=84, height=22,
+                          command=lambda l=lbl: self._strategy_info_popup(l),
+                          ).pack(side="right")
 
             row = ctk.CTkFrame(card, fg_color="transparent")
             row.pack(fill="x", padx=14, pady=(0, 6))
@@ -522,13 +538,128 @@ class TwStrategyApp(ctk.CTk):
                         t, f"{sym.replace('.TW','')} {name}", l),
                 ).pack(anchor="w", padx=14, pady=(2, 10))
 
+    # ── 策略說明 ──────────────────────────────────────────────────────────────────
+    _STRAT_DESC: dict[str, tuple[str, str]] = {
+        "v2 STRONG BUY策略": (
+            "v2 STRONG BUY 擇時策略（2年回測）",
+            "進場條件（三項同時成立）：\n"
+            "  • 60日回撤 ≤ -20%（從近期高點跌超 20%）\n"
+            "  • 價格 < AVWAP × b2（b2 < b1，更折扣的入場目標）\n"
+            "  • RSI ≤ rsi_sbuy（個股設定，更超賣門檻）\n\n"
+            "出場條件（三項同時成立）：\n"
+            "  • RSI ≥ rsi_sell（強勁動能）\n"
+            "  • 價格 ≥ AVWAP × s（超過目標倍率）\n"
+            "  • 價格 > MA20 × 1.15（高於 20 日均線 15%）\n\n"
+            "比 BUY 策略更保守，等更大跌幅才進場。\n"
+            "交易次數少，但每筆報酬通常較高。",
+        ),
+        "v2 BUY策略": (
+            "v2 BUY 擇時策略（2年回測）",
+            "進場條件（三項同時成立）：\n"
+            "  • 60日回撤 ≤ -10%（從近期高點跌超 10%）\n"
+            "  • 價格 < AVWAP × b1（低於錨定均量價折扣線）\n"
+            "  • RSI ≤ rsi_buy（個股設定，約 35–45）\n\n"
+            "出場條件（三項同時成立）：\n"
+            "  • RSI ≥ rsi_sell（強勁，約 65–75）\n"
+            "  • 價格 ≥ AVWAP × s\n"
+            "  • 價格 > MA20 × 1.15\n\n"
+            "AVWAP（Anchored VWAP）：從 60 日低點錨定計算\n"
+            "成交量加權均價，代表市場平均持倉成本。",
+        ),
+        "v2 STRONG BUY DCA": (
+            "v2 STRONG BUY 擇時加碼（10年 DCA）",
+            "觸發條件（三項同時成立）：\n"
+            "  • 60日回撤 ≤ -20%\n"
+            "  • 價格 < AVWAP × b2\n"
+            "  • RSI ≤ rsi_sbuy（個股設定）\n\n"
+            "資金邏輯：\n"
+            "每年年初注入 NT$100,000，資金累積等待觸發。\n"
+            "觸發當日將所有累積資金一次買入。\n"
+            "若全年未觸發，資金滾入下一年。\n\n"
+            "門檻更高→等待時間更長→買入時機在更深低點。",
+        ),
+        "v2 BUY DCA": (
+            "v2 BUY 擇時加碼（10年 DCA）",
+            "觸發條件（三項同時成立）：\n"
+            "  • 60日回撤 ≤ -10%\n"
+            "  • 價格 < AVWAP × b1\n"
+            "  • RSI ≤ rsi_buy（個股設定）\n\n"
+            "資金邏輯：\n"
+            "每年年初注入 NT$100,000，資金累積等待觸發。\n"
+            "觸發當日將所有累積資金一次買入。\n"
+            "若全年未觸發，資金滾入下一年。\n\n"
+            "相比 B&H，此策略等待技術面低點才買入，\n"
+            "長期理論上可取得較佳的平均買入價格。",
+        ),
+        "市場警戒逆向加碼": (
+            "市場警戒逆向加碼（10年 DCA）",
+            "觸發條件（大盤進入 WARN 或 RISK 模式）：\n\n"
+            "  WARN：加權指數 60日回撤 > -10%\n"
+            "        或 ETF50 60日回撤 > -8%\n"
+            "  RISK：加權指數 60日回撤 > -20%\n"
+            "        或 ETF50 60日回撤 > -15%\n\n"
+            "邏輯：\n"
+            "整體市場系統性下跌時，優質個股往往被\n"
+            "連帶錯殺，逆向加碼具有較高安全邊際。\n"
+            "不看個股技術面，只依大盤恐慌程度決定。",
+        ),
+    }
+
+    def _strategy_info_popup(self, label: str):
+        import tkinter as tk
+
+        key = next((k for k in self._STRAT_DESC if k in label), None)
+        if key:
+            title, body = self._STRAT_DESC[key]
+        else:
+            title = "B&H DCA（無條件買入）"
+            body  = (
+                "策略邏輯：\n"
+                "  每年年初固定注入資金，無論市況直接買入。\n"
+                "  完全不擇時，不看技術指標。\n\n"
+                "適合場景：\n"
+                "  長期持有高品質資產（如 ETF）。\n"
+                "  學術研究顯示多數主動擇時策略\n"
+                "  長期難以持續跑贏簡單 B&H。\n\n"
+                "此策略作為其他策略的基準比較（Benchmark）。"
+            )
+
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("500x360")
+        win.configure(bg="#0f1a30")
+        win.resizable(False, False)
+        win.lift()
+
+        tk.Label(win, text=title,
+                 fg="#74b9ff", bg="#0f1a30",
+                 font=(self.ui_font, 13, "bold"),
+                 wraplength=460, justify="left"
+                 ).pack(anchor="w", padx=16, pady=(14, 6))
+
+        tk.Frame(win, bg="#2a3a5a", height=1).pack(fill="x", padx=16, pady=(0, 10))
+
+        tk.Label(win, text=body,
+                 fg="#d8e8ff", bg="#0f1a30",
+                 font=("Consolas", 11),
+                 justify="left", wraplength=460
+                 ).pack(anchor="w", padx=16, pady=(0, 16))
+
     def _dca_popup(self, transactions: list[dict], stock: str, strategy: str):
         import tkinter as tk
         from tkinter import ttk as _ttk
 
+        has_trigger   = any("trigger" in t for t in transactions)
+        trigger_keys: list[str] = []
+        if has_trigger:
+            for t in transactions:
+                for k in t.get("trigger", {}):
+                    if k not in trigger_keys:
+                        trigger_keys.append(k)
+
         win = tk.Toplevel(self)
         win.title(f"{stock}  {strategy}")
-        win.geometry("640x480")
+        win.geometry(f"{'860' if has_trigger else '640'}x480")
         win.configure(bg="#0f1a30")
         win.lift()
 
@@ -547,6 +678,10 @@ class TwStrategyApp(ctk.CTk):
         tk.Label(smr, text=f"總注資  NT${total_cost:,.0f}",
                  fg="#fdcb6e", bg="#1a2a40",
                  font=("Consolas", 10)).pack(side="left", padx=10, pady=4)
+        if has_trigger:
+            tk.Label(smr, text="  ← 觸發條件欄位：記錄加碼當日各指標數值",
+                     fg="#888", bg="#1a2a40",
+                     font=("Consolas", 9)).pack(side="left", padx=4)
 
         sty = _ttk.Style(win)
         sty.theme_use("clam")
@@ -559,8 +694,12 @@ class TwStrategyApp(ctk.CTk):
                       font=(self.ui_font, 11, "bold"))
         sty.map("D.Treeview", background=[("selected", "#1c4f82")])
 
-        cols   = ("注資日期", "買入價格", "買入股數", "注資金額")
-        widths = (130, 110, 110, 130)
+        base_cols   = ("注資日期", "買入價格", "買入股數", "注資金額")
+        base_widths = (130, 110, 100, 120)
+        trig_cols   = tuple(trigger_keys)
+        trig_widths = tuple(90 for _ in trigger_keys)
+        cols   = base_cols + trig_cols
+        widths = base_widths + trig_widths
 
         wrap = tk.Frame(win, bg="#0f1a30")
         wrap.pack(fill="both", expand=True, padx=10, pady=6)
@@ -577,12 +716,16 @@ class TwStrategyApp(ctk.CTk):
         vsb.pack(side="right", fill="y")
 
         for t in transactions:
-            tree.insert("", "end", values=(
+            vals: tuple = (
                 t.get("date", "?"),
                 f"{t.get('price', 0):,.2f}",
                 f"{int(t.get('shares', 0)):,}",
                 f"NT${t.get('cost', 0):,.0f}",
-            ))
+            )
+            if has_trigger:
+                trig = t.get("trigger", {})
+                vals += tuple(str(trig.get(k, "—")) for k in trigger_keys)
+            tree.insert("", "end", values=vals)
 
     def _trade_popup(self, trades: list[dict], stock: str, strategy: str):
         import tkinter as tk

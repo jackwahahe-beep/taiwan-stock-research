@@ -1,8 +1,8 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-04-30（Session 7 開始）
+> 上次更新：2026-04-30（Session 8 完成）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
-> 最新 commit：3cd7679
+> 最新 commit：（Session 8 完成後更新）
 
 ---
 
@@ -181,6 +181,34 @@ python tw_scheduler.py --outcome
 | 00713.TW | 元大台灣高息低波 | 2,000 | NT$47.58 | 持有中 |
 | 2409.TW | 友達 | 400 | NT$27.41 | 待機賣出（虧損中）|
 | 2618.TW | 長榮航 | 59 | NT$0（配股）| 觀察中 |
+
+---
+
+## Session 8 完成事項（2026-04-30）
+
+### ABCD 四項策略優化 — tw_backtest_signals.py + tw_ui.py
+
+| # | 代號 | 說明 | 實作細節 |
+|---|---|---|---|
+| A | **年末強制部署** | 若全年未觸發 BUY/SBUY，最後交易日部署全部現金 | `year_last_days` + `deployed_this_year` 標記 |
+| B | **TRIM 門檻 30%** | 從 15% 提升，避免牛市過早止盈 | `TRIM_PROFIT = 30.0`；MODES label 改「混合+止盈30%策略」 |
+| C | **ETF 跳過 SELL** | ETF 長期持有，RSI 很難達到 SELL 閾值 | `ETF_SYMBOLS` 常量 + `is_etf = symbol in ETF_SYMBOLS` |
+| D | **SBUY 全倉出擊** | 深度回調 = 最大配置機會，部署全部積累現金 | `spend = cash`（移除 LOT_SBUY 上限） |
+
+### UI 更新（tw_ui.py）
+- 交易明細彈窗加 FALLBACK 紫色列（`tag="fallback"`，顏色 `#a29bfe`）
+- 圖例新增「🔵 年末強制部署 FALLBACK」
+- INFO bar 中 TRIM% 已自動從 `params["trim_pct"]` 讀取，顯示 30%（不需另改）
+
+---
+
+## Session 8 待辦（信號跟單回測 + UI Tab，上個 Session 遺留）
+
+- [x] 信號回測核心（tw_backtest_signals.py）
+- [x] UI 加入跟單回測 Tab（tw_ui.py）
+- [x] tw_scheduler.py 加 `--signal-bt` 旗標
+- [x] ABCD 策略優化（Session 8）
+- [ ] 重新執行 `python tw_scheduler.py --signal-bt` 以刷新快取
 
 ---
 

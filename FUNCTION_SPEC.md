@@ -1,6 +1,6 @@
 # FUNCTION_SPEC — 台股研究
 
-> 版本：v2.2　最後更新：2026-04-30
+> 版本：v2.3　最後更新：2026-04-30（Session 8）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
 
 ---
@@ -27,6 +27,8 @@
 | GitHub Actions 雲端自動執行 | ✅ 不需本機長時間開機 |
 | 台灣假日過濾 | ✅ is_trading_day()，holidays.TW() |
 | 敏感資訊保護 | ✅ Webhook URL 存於 .env / GitHub Secret |
+| **信號跟單回測（10年，4策略）** | ✅ tw_backtest_signals.py；UI 跟單回測 Tab |
+| 跟單回測 ABCD 優化 | ✅ A年末強制、B止盈30%、CETF免SELL、DSBUY全倉 |
 | **DCA 資產曲線圖** | 🔲 Session 7 待實作 |
 | **信號準確度儀表板（UI Tab）** | 🔲 Session 7 待實作 |
 | **持股即時 P&L 追蹤（UI）** | 🔲 Session 7 待實作 |

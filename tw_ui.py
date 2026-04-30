@@ -1790,6 +1790,7 @@ class TwStrategyApp(ctk.CTk):
         tree.tag_configure("loss",     foreground="#e74c3c")
         tree.tag_configure("open_end", foreground="#f39c12")
         tree.tag_configure("trim",     foreground="#1abc9c")
+        tree.tag_configure("fallback", foreground="#a29bfe")
 
         vsb = _ttk.Scrollbar(wrap, orient="vertical",   command=tree.yview)
         hsb = _ttk.Scrollbar(wrap, orient="horizontal",  command=tree.xview)
@@ -1803,11 +1804,13 @@ class TwStrategyApp(ctk.CTk):
         for t in trades:
             ec   = t.get("entry_cond", {})
             xc   = t.get("exit_cond", {})
-            xsig = t.get("exit_signal", "")
-            pnl  = t.get("pnl", 0)
-            tag  = ("open_end" if xsig == "PERIOD_END"
-                    else "trim" if xsig == "TRIM"
-                    else "win" if pnl > 0 else "loss")
+            xsig  = t.get("exit_signal", "")
+            esig  = t.get("entry_signal", "")
+            pnl   = t.get("pnl", 0)
+            tag   = ("fallback" if esig == "FALLBACK"
+                     else "open_end" if xsig == "PERIOD_END"
+                     else "trim" if xsig == "TRIM"
+                     else "win" if pnl > 0 else "loss")
             vals = (
                 t.get("entry_date", ""),
                 t.get("entry_signal", ""),
@@ -1836,6 +1839,7 @@ class TwStrategyApp(ctk.CTk):
             ("  🔴 虧損出場", "#e74c3c"),
             ("  🟡 期末未平倉（以最後收盤計算）", "#f39c12"),
             ("  🩵 TRIM 停利出場", "#1abc9c"),
+            ("  🔵 年末強制部署 FALLBACK", "#a29bfe"),
         ]:
             tk.Label(legend, text=txt, fg=clr, bg="#0f1a30",
                      font=("Consolas", 9)).pack(side="left", padx=4)

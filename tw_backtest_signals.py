@@ -21,15 +21,18 @@ END_DATE      = "2025-12-31"
 ANNUAL_BUDGET = 100_000   # NT$ 每年注資金額（可由呼叫方覆寫）
 MAX_INJECT_YEARS = 10     # 最多注資年數（避免跨 11 個日曆年超過預期）
 SBUY_MULT     = 1.5       # STRONG BUY 單筆投入倍率（相對 ANNUAL_BUDGET）
-TRIM_PROFIT   = 15.0      # % 單筆獲利達此門檻 → TRIM 出場
+TRIM_PROFIT   = 30.0      # % 單筆獲利達此門檻 → TRIM 出場（B：從15%提升至30%）
 
 # (mode_id, label, buy_en, sbuy_en, trim_en)
 MODES = [
-    ("BUY",   "BUY 策略",         True,  False, False),
-    ("SBUY",  "STRONG BUY 策略",  False, True,  False),
-    ("ALL",   "混合策略",          True,  True,  False),
-    ("TRIM",  "混合+TRIM 策略",    True,  True,  True ),
+    ("BUY",   "BUY 策略",          True,  False, False),
+    ("SBUY",  "STRONG BUY 策略",   False, True,  False),
+    ("ALL",   "混合策略",           True,  True,  False),
+    ("TRIM",  "混合+止盈30% 策略",  True,  True,  True ),
 ]
+
+# C：ETF 不觸發 SELL（高息ETF 幾乎不會達到 SELL 閾值，且長期持有更佳）
+ETF_SYMBOLS = {"0050.TW", "00878.TW", "00713.TW", "00929.TW", "00919.TW", "006208.TW"}
 
 
 # ── 資料拉取 ──────────────────────────────────────────────────────────────
@@ -119,27 +122,41 @@ def _daily_signals(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 def _simulate(sig: pd.DataFrame,
               buy_en: bool, sbuy_en: bool, trim_en: bool,
-              annual_budget: float = ANNUAL_BUDGET) -> tuple[list[dict], float]:
+              annual_budget: float = ANNUAL_BUDGET,
+              symbol: str = "") -> tuple[list[dict], float]:
     """
-    每年年初注入 annual_budget，信號觸發時動用現金買入（最多 annual_budget/次）。
-    SELL/TRIM 出場後現金回收，可再次投入。
+    每年年初注入 annual_budget，信號觸發時動用現金買入。
+    A：若全年未部署，年末強制部署全部現金（FALLBACK）。
+    B：TRIM 門檻提升至 30%。
+    C：ETF 不觸發 SELL。
+    D：STRONG BUY 部署全部積累現金（深度回調 = 最大配置機會）。
     回傳 (trades, total_injected)。
     """
     LOT_BUY  = annual_budget
     LOT_SBUY = annual_budget * SBUY_MULT
 
-    cash:           float       = 0.0
-    total_injected: float       = 0.0
-    inject_count:   int         = 0
-    open_lots:      list[dict]  = []
-    trades:         list[dict]  = []
-    prev_sig        = "HOLD"
-    current_year    = None
+    # C: ETF 判斷
+    is_etf = symbol in ETF_SYMBOLS
+
+    # A: 預先計算每年最後一個交易日
+    year_last_days: dict = {}
+    for _dt in sig.index:
+        year_last_days[_dt.year] = _dt   # 升序排列，最後覆蓋 = 最後一天
+
+    cash:               float       = 0.0
+    total_injected:     float       = 0.0
+    inject_count:       int         = 0
+    open_lots:          list[dict]  = []
+    trades:             list[dict]  = []
+    prev_sig            = "HOLD"
+    current_year        = None
+    deployed_this_year  = False   # A: 本年是否已買入
 
     for dt, row in sig.iterrows():
         yr = dt.year
         if yr != current_year:
-            current_year = yr
+            current_year        = yr
+            deployed_this_year  = False   # A: 新年重置
             if inject_count < MAX_INJECT_YEARS:
                 cash           += annual_budget
                 total_injected += annual_budget
@@ -153,7 +170,7 @@ def _simulate(sig: pd.DataFrame,
         date_str = dt.date().isoformat()
         vs_avwap = round((price / avwap - 1) * 100, 1) if avwap > 0 else None
 
-        # 1. TRIM：每日檢查各持倉，獲利達門檻即出清並回收現金
+        # 1. TRIM：每日檢查各持倉，獲利達門檻即出清並回收現金（B：門檻 30%）
         if trim_en and open_lots:
             keep = []
             for lot in open_lots:
@@ -173,8 +190,10 @@ def _simulate(sig: pd.DataFrame,
                     keep.append(lot)
             open_lots = keep
 
-        # 2. SELL：關閉所有持倉，現金回收
-        if curr_sig == "SELL" and open_lots:
+        just_sold = False
+
+        # 2. SELL：關閉所有持倉，現金回收（C：ETF 跳過）
+        if curr_sig == "SELL" and open_lots and not is_etf:
             ec = {"RSI": round(rsi, 1), "vs_AVWAP%": vs_avwap}
             for lot in open_lots:
                 proceeds = lot["shares"] * price
@@ -188,6 +207,7 @@ def _simulate(sig: pd.DataFrame,
                                "exit_cond": ec})
                 cash += proceeds
             open_lots = []
+            just_sold = True
 
         # 3. BUY 進場（edge-triggered）
         elif curr_sig == "BUY" and buy_en and prev_sig != "BUY" and cash >= LOT_BUY * 0.3:
@@ -202,10 +222,11 @@ def _simulate(sig: pd.DataFrame,
                     "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
                                    "vs_AVWAP%": vs_avwap},
                 })
+                deployed_this_year = True   # A
 
-        # 4. STRONG BUY 進場（edge-triggered）
-        elif curr_sig == "STRONG BUY" and sbuy_en and prev_sig != "STRONG BUY" and cash >= LOT_SBUY * 0.3:
-            spend  = min(cash, LOT_SBUY)
+        # 4. STRONG BUY 進場（edge-triggered，D：部署全部積累現金）
+        elif curr_sig == "STRONG BUY" and sbuy_en and prev_sig != "STRONG BUY" and cash >= LOT_BUY * 0.3:
+            spend  = cash   # D: 深度回調 → 全力出擊
             shares = int(spend // price)
             if shares > 0:
                 cost  = round(shares * price, 0)
@@ -216,6 +237,22 @@ def _simulate(sig: pd.DataFrame,
                     "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
                                    "vs_AVWAP%": vs_avwap},
                 })
+                deployed_this_year = True   # A
+
+        # A: 年末強制部署（若本年完全未買入）
+        if dt == year_last_days.get(yr) and not deployed_this_year and not just_sold and cash >= LOT_BUY * 0.3:
+            spend  = cash
+            shares = int(spend // price)
+            if shares > 0:
+                cost  = round(shares * price, 0)
+                cash -= cost
+                open_lots.append({
+                    "entry_date": date_str, "entry_price": round(price, 2),
+                    "shares": shares, "cost": cost, "entry_signal": "FALLBACK",
+                    "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
+                                   "vs_AVWAP%": vs_avwap},
+                })
+                deployed_this_year = True
 
         prev_sig = curr_sig
 
@@ -345,7 +382,7 @@ def run_signal_backtest(symbol: str, name: str,
 
     modes_out = []
     for mode_id, label, buy_en, sbuy_en, trim_en in MODES:
-        trades, injected = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget)
+        trades, injected = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget, symbol=symbol)
         st = _stats(trades, bnh_ret, total_injected=injected, years=years)
         flag = "[+]" if st["beats_bnh"] else "[-]"
         print(f"    {flag} {label:<18}  {st['n_trades']:>2}筆  "

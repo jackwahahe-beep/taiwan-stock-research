@@ -289,7 +289,7 @@ def run_signal_backtest(symbol: str, name: str) -> dict:
     for mode_id, label, buy_en, sbuy_en, trim_en in MODES:
         trades = _simulate(sig, buy_en, sbuy_en, trim_en)
         st     = _stats(trades, bnh_ret)
-        flag   = "✅" if st["beats_bnh"] else "❌"
+        flag   = "[+]" if st["beats_bnh"] else "[-]"
         print(f"    {flag} {label:<18}  {st['n_trades']:>2}筆  "
               f"報酬{st['return_pct']:+6.1f}%  "
               f"勝率{st['win_rate']:5.1f}%  "
@@ -359,15 +359,15 @@ def build_signal_backtest_embed(result: dict) -> dict:
     p     = result.get("params", {})
 
     lines = [
-        f"📅 {result['start_date']} → {result['end_date']}",
-        f"📊 信號次數  SBUY×{sc.get('STRONG BUY',0)}  BUY×{sc.get('BUY',0)}  SELL×{sc.get('SELL',0)}",
+        f"[{result['start_date']} -> {result['end_date']}]",
+        f"信號次數  SBUY×{sc.get('STRONG BUY',0)}  BUY×{sc.get('BUY',0)}  SELL×{sc.get('SELL',0)}",
         "",
     ]
     for m in modes:
         s   = m["stats"]
-        tag = "✅" if s["beats_bnh"] else "❌"
+        tag = "[+]" if s["beats_bnh"] else "[-]"
         if s["n_trades"] == 0:
-            lines.append(f"⬜ **{m['label']}** — 無交易")
+            lines.append(f"  **{m['label']}** — 無交易")
         else:
             lines.append(
                 f"{tag} **{m['label']}** — "

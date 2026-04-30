@@ -87,6 +87,14 @@ def _load_dca_cache() -> dict:
     return {r["symbol"]: r for r in data}
 
 
+def _load_sbt_cache() -> dict:
+    files = sorted(_glob.glob(str(CACHE_DIR / "signal_backtest_*.json")), reverse=True)
+    if not files:
+        return {}
+    data = json.loads(Path(files[0]).read_text(encoding="utf-8"))
+    return {r["symbol"]: r for r in data if "error" not in r}
+
+
 def _build_scan_rows(scan_records: list[dict], cfg: dict) -> list[dict]:
     from tw_screener import SIGNAL_CONFIG, _DEFAULT_CFG
 
@@ -197,6 +205,7 @@ class TwStrategyApp(ctk.CTk):
         self._build_backtest_tab(self.tabs.add("  📈 回測  "))
         self._build_portfolio_tab(self.tabs.add("  💼 持股  "))
         self._build_accuracy_tab(self.tabs.add("  📊 準確度  "))
+        self._build_signal_bt_tab(self.tabs.add("  📋 跟單回測  "))
 
     # ════════════════════════════════════════════════════════════════════
     # 掃描 Tab
@@ -1358,6 +1367,419 @@ class TwStrategyApp(ctk.CTk):
             text=f"共 {len(rows)} 檔　{'　'.join(parts) or '無明確信號'}"
                  "　（試買=AVWAP×b1  加碼=AVWAP×b2  賣出=AVWAP×s）"
         )
+
+
+    # ════════════════════════════════════════════════════════════════════
+    # 跟單回測 Tab
+    # ════════════════════════════════════════════════════════════════════
+
+    def _build_signal_bt_tab(self, tab):
+        tab.configure(fg_color=BG)
+
+        bar = ctk.CTkFrame(tab, fg_color=BG_PANEL, height=46, corner_radius=0)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        ctk.CTkLabel(bar, text="📋 跟單回測（2015–2025）",
+                     font=(self.ui_font, 13, "bold"), text_color=C_BLUE
+                     ).pack(side="left", padx=16, pady=12)
+        ctk.CTkLabel(bar, text="模擬嚴格按 BUY / STRONG BUY / SELL 信號操作，逐筆記錄損益",
+                     font=(self.ui_font, 10), text_color=C_GRAY
+                     ).pack(side="left", padx=4)
+        self._sbt_status = ctk.CTkLabel(bar, text="",
+                                        font=(self.ui_font, 10), text_color=C_YELLOW)
+        self._sbt_status.pack(side="right", padx=12)
+
+        body = ctk.CTkFrame(tab, fg_color=BG, corner_radius=0)
+        body.pack(fill="both", expand=True, padx=8, pady=8)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        # 左側：股票清單
+        left = ctk.CTkFrame(body, fg_color=BG_PANEL, width=175, corner_radius=8)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.pack_propagate(False)
+        ctk.CTkLabel(left, text="股票清單",
+                     font=(self.ui_font, 12, "bold"), text_color=C_BLUE
+                     ).pack(pady=(12, 4), padx=12, anchor="w")
+
+        self._sbt_list   = ctk.CTkScrollableFrame(left, fg_color=BG_PANEL)
+        self._sbt_list.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # 右側：結果面板
+        right = ctk.CTkFrame(body, fg_color=BG, corner_radius=0)
+        right.grid(row=0, column=1, sticky="nsew")
+        self._sbt_detail = ctk.CTkScrollableFrame(right, fg_color=BG)
+        self._sbt_detail.pack(fill="both", expand=True)
+
+        # 載入快取、填充股票清單
+        self._sbt_cache: dict = _load_sbt_cache()
+        self._sbt_btns:  dict = {}
+
+        try:
+            cfg    = _load_config()
+            stocks = cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
+        except Exception:
+            stocks = []
+
+        for s in stocks:
+            sym, name = s["symbol"], s["name"]
+            has = sym in self._sbt_cache
+            btn = ctk.CTkButton(
+                self._sbt_list,
+                text=f"{sym.replace('.TW','')}  {name}",
+                font=(self.ui_font, 11),
+                fg_color="transparent", hover_color=BG_ROW_A,
+                text_color=C_WHITE if has else C_GRAY,
+                anchor="w", height=32,
+                command=lambda sy=sym, nm=name: self._on_sbt_select(sy, nm),
+            )
+            btn.pack(fill="x", pady=1, padx=2)
+            self._sbt_btns[sym] = btn
+
+        self._sbt_hint()
+
+    def _sbt_hint(self):
+        for w in self._sbt_detail.winfo_children():
+            w.destroy()
+        if not self._sbt_cache:
+            ctk.CTkLabel(self._sbt_detail,
+                         text="尚無跟單回測快取\n\n請先執行：\npython tw_scheduler.py --signal-bt",
+                         font=(self.ui_font, 13), text_color=C_YELLOW,
+                         justify="center").pack(pady=60)
+        else:
+            ctk.CTkLabel(self._sbt_detail,
+                         text="← 點選左側股票查看跟單回測結果\n\n"
+                              "每支股票顯示：B&H 基準 + 4 種策略模式比較\n"
+                              "每種模式可展開逐筆交易明細",
+                         font=(self.ui_font, 12), text_color=C_GRAY,
+                         justify="center").pack(pady=60)
+
+    def _on_sbt_select(self, sym: str, name: str):
+        for s, b in self._sbt_btns.items():
+            b.configure(fg_color="#1f4e79" if s == sym else "transparent")
+        for w in self._sbt_detail.winfo_children():
+            w.destroy()
+
+        result = self._sbt_cache.get(sym)
+        if result:
+            self._sbt_show_result(sym, name, result)
+        else:
+            # 顯示「執行回測」按鈕
+            ctk.CTkLabel(self._sbt_detail,
+                         text=f"{sym.replace('.TW','')} {name}\n無快取",
+                         font=(self.ui_font, 13), text_color=C_YELLOW,
+                         justify="center").pack(pady=30)
+            ctk.CTkButton(
+                self._sbt_detail, text="▶ 執行此股票回測（約 10–30 秒）",
+                font=(self.ui_font, 12),
+                fg_color="#1f4e79", hover_color="#2980b9",
+                command=lambda: self._sbt_run_stock(sym, name),
+            ).pack(pady=10)
+
+    def _sbt_run_stock(self, sym: str, name: str):
+        self._sbt_status.configure(text=f"執行中：{sym.replace('.TW','')}…")
+        for w in self._sbt_detail.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(self._sbt_detail, text="資料拉取中，請稍候…",
+                     font=(self.ui_font, 12), text_color=C_YELLOW).pack(pady=60)
+
+        def _bg():
+            try:
+                from tw_backtest_signals import run_signal_backtest
+                result = run_signal_backtest(sym, name)
+                if "error" not in result:
+                    self._sbt_cache[sym] = result
+                    if sym in self._sbt_btns:
+                        self.after(0, lambda: self._sbt_btns[sym].configure(text_color=C_WHITE))
+                    self.after(0, lambda: self._sbt_show_result(sym, name, result))
+                else:
+                    err = result["error"]
+                    self.after(0, lambda: self._sbt_status.configure(text=f"失敗：{err}"))
+            except Exception as e:
+                self.after(0, lambda: self._sbt_status.configure(text=f"錯誤：{e}"))
+            finally:
+                self.after(0, lambda: self._sbt_status.configure(text=""))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _sbt_show_result(self, sym: str, name: str, result: dict):
+        for w in self._sbt_detail.winfo_children():
+            w.destroy()
+
+        bnh   = result.get("bnh", {})
+        modes = result.get("modes", [])
+        sc    = result.get("sig_counts", {})
+        p     = result.get("params", {})
+
+        # ── 標題列 ────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(self._sbt_detail, fg_color="transparent")
+        hdr.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(hdr,
+                     text=f"📋 {sym.replace('.TW','')} {name}   "
+                          f"{result.get('start_date','')} → {result.get('end_date','')}",
+                     font=(self.ui_font, 13, "bold"), text_color=C_BLUE
+                     ).pack(side="left")
+
+        # ── 信號統計 + 回測設定 ───────────────────────────────────────
+        info = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=6)
+        info.pack(fill="x", padx=12, pady=(0, 8))
+        for txt, clr in [
+            (f"STRONG BUY ×{sc.get('STRONG BUY',0)}", C_STRONG),
+            (f"  BUY ×{sc.get('BUY',0)}", C_GREEN),
+            (f"  SELL ×{sc.get('SELL',0)}", C_RED),
+            (f"   │  BUY預算 NT${p.get('budget',0)//10000}萬  "
+             f"SBUY預算 NT${p.get('sbuy_budget',0)//10000}萬  "
+             f"最多{p.get('max_lots',3)}筆同時  "
+             f"TRIM≥{p.get('trim_pct',15):.0f}%", C_GRAY),
+        ]:
+            ctk.CTkLabel(info, text=txt, font=(self.ui_font, 10),
+                         text_color=clr).pack(side="left", padx=6, pady=5)
+
+        # ── 摘要比較表 ────────────────────────────────────────────────
+        ctk.CTkLabel(self._sbt_detail, text="策略摘要比較",
+                     font=(self.ui_font, 11, "bold"), text_color=C_BLUE
+                     ).pack(anchor="w", padx=16, pady=(4, 2))
+
+        tbl = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=8)
+        tbl.pack(fill="x", padx=12, pady=(0, 10))
+
+        headers = ["策略", "交易次", "勝率", "總投入", "總損益", "報酬率",
+                   "平均持有", "最佳%", "最差%", "vs B&H"]
+        widths  = [155, 60, 65, 100, 110, 75, 75, 65, 65, 70]
+
+        hdr_row = ctk.CTkFrame(tbl, fg_color="#0f1a30")
+        hdr_row.pack(fill="x", padx=2, pady=(2, 0))
+        for h, w in zip(headers, widths):
+            ctk.CTkLabel(hdr_row, text=h, font=(self.ui_font, 10, "bold"),
+                         text_color="#74b9ff", width=w, anchor="center"
+                         ).pack(side="left")
+
+        # B&H 基準列
+        bnh_row = ctk.CTkFrame(tbl, fg_color="#1a1a0d")
+        bnh_row.pack(fill="x", padx=2, pady=1)
+        bnh_ret = bnh.get("return_pct", 0)
+        for val, w, clr in [
+            ("📌 B&H 基準",               155, C_YELLOW),
+            ("1",                          60,  C_GRAY),
+            ("—",                          65,  C_GRAY),
+            (f"NT${bnh.get('cost',0):,}",  100, C_GRAY),
+            (f"NT${bnh.get('pnl',0):+,}",  110, C_GREEN if bnh.get("pnl",0)>=0 else C_RED),
+            (f"{bnh_ret:+.1f}%",            75, C_GREEN if bnh_ret>=0 else C_RED),
+            (f"{bnh.get('hold_days',0)}天", 75,  C_GRAY),
+            ("—",                           65,  C_GRAY),
+            ("—",                           65,  C_GRAY),
+            ("基準",                         70,  C_YELLOW),
+        ]:
+            ctk.CTkLabel(bnh_row, text=val, font=(self.ui_font, 10),
+                         text_color=clr, width=w, anchor="center"
+                         ).pack(side="left")
+
+        # 各策略列
+        for m in modes:
+            s    = m["stats"]
+            beat = s["beats_bnh"]
+            ret  = s["return_pct"]
+            pnl  = s["total_pnl"]
+            row_bg = "#0d2d0d" if beat else "transparent"
+            dr = ctk.CTkFrame(tbl, fg_color=row_bg)
+            dr.pack(fill="x", padx=2, pady=1)
+            tag  = "✅" if beat else "❌"
+            pclr = C_GREEN if pnl >= 0 else C_RED
+            rclr = C_GREEN if ret >= 0 else C_RED
+            wclr = C_GREEN if s["win_rate"] >= 60 else (C_YELLOW if s["win_rate"] >= 40 else C_RED)
+            for val, w, clr in [
+                (f"{tag} {m['label']}",        155, C_GREEN if beat else C_YELLOW),
+                (str(s["n_trades"]),             60,  C_GRAY),
+                (f"{s['win_rate']:.0f}%",        65,  wclr),
+                (f"NT${s['total_invested']:,.0f}",100, C_GRAY),
+                (f"NT${pnl:+,.0f}",              110, pclr),
+                (f"{ret:+.1f}%",                 75,  rclr),
+                (f"{s['avg_hold_days']}天",       75,  C_GRAY),
+                (f"{s['best_pct']:+.1f}%",        65,  C_GREEN),
+                (f"{s['worst_pct']:+.1f}%",       65,  C_RED),
+                ("勝" if beat else "輸",           70,  C_GREEN if beat else C_RED),
+            ]:
+                ctk.CTkLabel(dr, text=val, font=(self.ui_font, 10),
+                             text_color=clr, width=w, anchor="center"
+                             ).pack(side="left")
+
+        # ── 各策略卡片（含交易明細按鈕）─────────────────────────────
+        for m in modes:
+            s     = m["stats"]
+            beat  = s["beats_bnh"]
+            trades = m.get("trades", [])
+
+            card = ctk.CTkFrame(
+                self._sbt_detail,
+                fg_color="#0d2d0d" if beat else "#0d1a2d",
+                corner_radius=10)
+            card.pack(fill="x", padx=12, pady=3)
+
+            # 卡片標題
+            card_hdr = ctk.CTkFrame(card, fg_color="transparent")
+            card_hdr.pack(fill="x", padx=14, pady=(8, 4))
+            flag = "✅" if beat else ("⬜" if s["n_trades"] == 0 else "❌")
+            ctk.CTkLabel(card_hdr,
+                         text=f"{flag} {m['label']}",
+                         font=(self.ui_font, 12, "bold"),
+                         text_color=C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_YELLOW)
+                         ).pack(side="left")
+            if trades:
+                lbl = m["label"]
+                ctk.CTkButton(
+                    card_hdr, text=f"📋 展開明細（{len(trades)} 筆）",
+                    font=(self.ui_font, 10), width=130, height=24,
+                    fg_color="#1a3a60", hover_color="#2d5a8e",
+                    text_color="#74b9ff",
+                    command=lambda t=trades, l=lbl, sn=f"{sym.replace('.TW','')} {name}":
+                        self._sbt_trade_popup(t, sn, l),
+                ).pack(side="right")
+
+            if s["n_trades"] == 0:
+                ctk.CTkLabel(card, text="此策略在此期間無任何交易",
+                             font=(self.ui_font, 10), text_color=C_GRAY
+                             ).pack(anchor="w", padx=18, pady=(0, 8))
+                continue
+
+            # 指標行
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=14, pady=(0, 8))
+            ret  = s["return_pct"]
+            pnl  = s["total_pnl"]
+            for label, val, clr in [
+                ("報酬率",   f"{ret:+.1f}%",            C_GREEN if ret>=0 else C_RED),
+                ("總損益",   f"NT${pnl:+,.0f}",          C_GREEN if pnl>=0 else C_RED),
+                ("勝率",     f"{s['win_rate']:.0f}%",    C_GREEN if s['win_rate']>=60 else C_YELLOW),
+                ("交易次",   str(s["n_trades"]),          C_GRAY),
+                ("平均持有", f"{s['avg_hold_days']}天",   C_GRAY),
+                ("最佳",     f"{s['best_pct']:+.1f}%",   C_GREEN),
+                ("最差",     f"{s['worst_pct']:+.1f}%",  C_RED),
+                ("期末未結", str(s["n_open_end"]),         C_YELLOW if s["n_open_end"] else C_GRAY),
+            ]:
+                col = ctk.CTkFrame(row, fg_color="transparent")
+                col.pack(side="left", padx=8)
+                ctk.CTkLabel(col, text=label,
+                             font=(self.ui_font, 9), text_color=C_GRAY).pack()
+                ctk.CTkLabel(col, text=val,
+                             font=(self.ui_font, 11, "bold"), text_color=clr).pack()
+
+    def _sbt_trade_popup(self, trades: list[dict], stock: str, mode_label: str):
+        import tkinter as tk
+        from tkinter import ttk as _ttk
+
+        win = tk.Toplevel(self)
+        win.title(f"{stock}  {mode_label}")
+        win.geometry("1280x560")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        # 標題 + 統計
+        hdr = tk.Frame(win, bg="#0f1a30")
+        hdr.pack(fill="x", padx=10, pady=(8, 2))
+        tk.Label(hdr, text=f"{stock}  {mode_label}",
+                 fg="#74b9ff", bg="#0f1a30",
+                 font=(self.ui_font, 12, "bold")).pack(side="left")
+        tk.Label(hdr, text=f"  共 {len(trades)} 筆交易",
+                 fg="#888", bg="#0f1a30",
+                 font=("Consolas", 11)).pack(side="left")
+
+        n_win   = sum(1 for t in trades if t["pnl"] > 0)
+        tot_pnl = sum(t["pnl"] for t in trades)
+        tot_inv = sum(t["cost"] for t in trades)
+        ret_pct = tot_pnl / tot_inv * 100 if tot_inv > 0 else 0
+        pnl_clr = "#00b894" if tot_pnl >= 0 else "#d63031"
+
+        smr = tk.Frame(win, bg="#1a2a40")
+        smr.pack(fill="x", padx=10, pady=2)
+        for txt, clr in [
+            (f"總投入  NT${tot_inv:,.0f}", "#fdcb6e"),
+            (f"  總損益  NT${tot_pnl:+,.0f}  ({ret_pct:+.1f}%)", pnl_clr),
+            (f"  勝率  {n_win}/{len(trades)}  ({n_win/len(trades)*100:.0f}%)"
+             if trades else "", "#74b9ff"),
+        ]:
+            tk.Label(smr, text=txt, fg=clr, bg="#1a2a40",
+                     font=("Consolas", 10)).pack(side="left", padx=8, pady=4)
+
+        # 樣式
+        sty = _ttk.Style(win)
+        sty.theme_use("clam")
+        sty.configure("T.Treeview",
+                      background="#0d1b2a", foreground="#ecf0f1",
+                      fieldbackground="#0d1b2a", rowheight=22,
+                      font=("Consolas", 10))
+        sty.configure("T.Treeview.Heading",
+                      background="#0a0f1a", foreground="#74b9ff",
+                      font=(self.ui_font, 10, "bold"))
+        sty.map("T.Treeview", background=[("selected", "#1c4f82")])
+
+        cols = ("進場日", "進場信號", "DD%", "RSI進", "vs_AVWAP%",
+                "進場價", "股數", "成本NT$",
+                "出場日", "出場信號", "RSI出", "出場價", "回收NT$",
+                "損益NT$", "損益%", "持有天")
+        widths = (95, 95, 60, 55, 75, 70, 60, 90, 95, 80, 55, 70, 90, 90, 65, 65)
+
+        wrap = tk.Frame(win, bg="#0f1a30")
+        wrap.pack(fill="both", expand=True, padx=10, pady=6)
+
+        tree = _ttk.Treeview(wrap, style="T.Treeview",
+                              columns=cols, show="headings", selectmode="browse")
+        for c, w in zip(cols, widths):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor="center", minwidth=40)
+
+        tree.tag_configure("win",      foreground="#2ecc71")
+        tree.tag_configure("loss",     foreground="#e74c3c")
+        tree.tag_configure("open_end", foreground="#f39c12")
+        tree.tag_configure("trim",     foreground="#1abc9c")
+
+        vsb = _ttk.Scrollbar(wrap, orient="vertical",   command=tree.yview)
+        hsb = _ttk.Scrollbar(wrap, orient="horizontal",  command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        wrap.grid_rowconfigure(0, weight=1)
+        wrap.grid_columnconfigure(0, weight=1)
+
+        for t in trades:
+            ec   = t.get("entry_cond", {})
+            xc   = t.get("exit_cond", {})
+            xsig = t.get("exit_signal", "")
+            pnl  = t.get("pnl", 0)
+            tag  = ("open_end" if xsig == "PERIOD_END"
+                    else "trim" if xsig == "TRIM"
+                    else "win" if pnl > 0 else "loss")
+            vals = (
+                t.get("entry_date", ""),
+                t.get("entry_signal", ""),
+                f"{ec.get('DD%', '—')}",
+                f"{ec.get('RSI', '—')}",
+                f"{ec.get('vs_AVWAP%', '—')}",
+                f"{t.get('entry_price', 0):,.2f}",
+                f"{t.get('shares', 0):,}",
+                f"NT${t.get('cost', 0):,.0f}",
+                t.get("exit_date", ""),
+                xsig,
+                f"{xc.get('RSI', '—')}",
+                f"{t.get('exit_price', 0):,.2f}",
+                f"NT${t.get('proceeds', 0):,.0f}",
+                f"NT${pnl:+,.0f}",
+                f"{t.get('pnl_pct', 0):+.2f}%",
+                f"{t.get('hold_days', 0)}",
+            )
+            tree.insert("", "end", tags=(tag,), values=vals)
+
+        # 說明列
+        legend = tk.Frame(win, bg="#0f1a30")
+        legend.pack(fill="x", padx=10, pady=(0, 6))
+        for txt, clr in [
+            ("🟢 獲利出場", "#2ecc71"),
+            ("  🔴 虧損出場", "#e74c3c"),
+            ("  🟡 期末未平倉（以最後收盤計算）", "#f39c12"),
+            ("  🩵 TRIM 停利出場", "#1abc9c"),
+        ]:
+            tk.Label(legend, text=txt, fg=clr, bg="#0f1a30",
+                     font=("Consolas", 9)).pack(side="left", padx=4)
 
 
 def main():

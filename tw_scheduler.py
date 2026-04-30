@@ -5,6 +5,7 @@
   python tw_scheduler.py --backtest   # 同上 + 重新跑 2 年信號回測（手動用）
   python tw_scheduler.py --dca        # 執行 10 年 DCA 回測並推播（手動 / 每週日）
   python tw_scheduler.py --weekly     # 週報摘要推播
+  python tw_scheduler.py --signal-bt  # 執行跟單回測（10 年，4 種模式），儲存快取
   python tw_scheduler.py --daemon     # 常駐排程
 """
 
@@ -153,6 +154,29 @@ def run_dca():
     print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
 
 
+def run_signal_bt():
+    """執行 10 年跟單回測（4 種模式），結果儲存至 cache/signal_backtest_*.json。"""
+    from tw_backtest_signals import run_signal_backtest_all, build_signal_backtest_embed
+    from tw_discord import send_webhook, load_config as discord_cfg
+
+    print(f"\n{'='*50}")
+    print(f"跟單回測啟動 {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}\n")
+
+    results = run_signal_backtest_all()
+
+    if "--push" in sys.argv:
+        cfg = discord_cfg()
+        url = cfg["discord"]["webhook_url"]
+        for r in results:
+            embed = build_signal_backtest_embed(r)
+            if embed:
+                ok = send_webhook({"embeds": [embed]}, url)
+                print(f"[Discord] {r['name']} 跟單回測推播 — {'成功' if ok else '失敗'}")
+
+    print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
+
+
 if __name__ == "__main__":
     if "--daemon" in sys.argv:
         run_daemon()
@@ -160,6 +184,8 @@ if __name__ == "__main__":
         run_dca()
     elif "--weekly" in sys.argv:
         run_weekly_report()
+    elif "--signal-bt" in sys.argv:
+        run_signal_bt()
     elif "--outcome" in sys.argv:
         from tw_outcome import grade_date, compute_rolling_accuracy
         target = sys.argv[2] if len(sys.argv) > 2 else None

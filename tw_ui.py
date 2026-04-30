@@ -195,6 +195,8 @@ class TwStrategyApp(ctk.CTk):
 
         self._build_scan_tab(self.tabs.add("  📡 掃描  "))
         self._build_backtest_tab(self.tabs.add("  📈 回測  "))
+        self._build_portfolio_tab(self.tabs.add("  💼 持股  "))
+        self._build_accuracy_tab(self.tabs.add("  📊 準確度  "))
 
     # ════════════════════════════════════════════════════════════════════
     # 掃描 Tab
@@ -284,10 +286,10 @@ class TwStrategyApp(ctk.CTk):
         bar = ctk.CTkFrame(tab, fg_color=BG_PANEL, height=46, corner_radius=0)
         bar.pack(fill="x")
         bar.pack_propagate(False)
-        ctk.CTkLabel(bar, text="📈 2年信號回測明細",
+        ctk.CTkLabel(bar, text="📈 10年 DCA 回測",
                      font=(self.ui_font, 13, "bold"), text_color=C_BLUE
                      ).pack(side="left", padx=16, pady=12)
-        ctk.CTkLabel(bar, text="快取為上次 --backtest 執行結果　點選左側股票查看詳情",
+        ctk.CTkLabel(bar, text="點選左側股票查看詳情",
                      font=(self.ui_font, 10), text_color=C_GRAY
                      ).pack(side="left", padx=4)
 
@@ -378,10 +380,24 @@ class TwStrategyApp(ctk.CTk):
         sep = ctk.CTkFrame(self._bt_detail, fg_color="#2a2a4a", height=2, corner_radius=0)
         sep.pack(fill="x", padx=12, pady=(12, 6))
 
-        ctk.CTkLabel(self._bt_detail,
+        hdr_row = ctk.CTkFrame(self._bt_detail, fg_color="transparent")
+        hdr_row.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(hdr_row,
                      text=f"📊 10年 DCA 回測　{period}　每年注資 NT${budget:,}",
                      font=(self.ui_font, 13, "bold"), text_color=C_BLUE
-                     ).pack(anchor="w", padx=16, pady=(0, 6))
+                     ).pack(side="left", padx=4)
+        ctk.CTkButton(hdr_row, text="📉 資產曲線",
+                      font=(self.ui_font, 10), width=90, height=24,
+                      fg_color="#1a3040", hover_color="#2a4a60",
+                      text_color="#74b9ff",
+                      command=lambda: self._show_chart_popup(sym, name, dca),
+                      ).pack(side="right", padx=4)
+        ctk.CTkButton(hdr_row, text="📈 敏感度",
+                      font=(self.ui_font, 10), width=78, height=24,
+                      fg_color="#1a3040", hover_color="#2a4a60",
+                      text_color="#a8e6cf",
+                      command=lambda: self._show_sensitivity_popup(sym, name, dca),
+                      ).pack(side="right", padx=2)
 
         # ── 摘要比較表 ────────────────────────────────────────────────────────
         strategies = dca.get("strategies", [])
@@ -567,6 +583,573 @@ class TwStrategyApp(ctk.CTk):
                  font=("Consolas", 11),
                  justify="left", wraplength=460
                  ).pack(anchor="w", padx=16, pady=(0, 16))
+
+    # ════════════════════════════════════════════════════════════════════
+    # 持股 Tab
+    # ════════════════════════════════════════════════════════════════════
+
+    def _build_portfolio_tab(self, tab):
+        tab.configure(fg_color=BG)
+
+        bar = ctk.CTkFrame(tab, fg_color=BG_PANEL, height=46, corner_radius=0)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        ctk.CTkLabel(bar, text="💼 持股 P&L 總覽",
+                     font=(self.ui_font, 13, "bold"), text_color=C_BLUE
+                     ).pack(side="left", padx=16, pady=12)
+        self._pf_lbl_total = ctk.CTkLabel(bar, text="",
+                                          font=(self.ui_font, 11), text_color=C_GRAY)
+        self._pf_lbl_total.pack(side="left", padx=16)
+        ctk.CTkButton(bar, text="⟳ 刷新", width=80, font=(self.ui_font, 11),
+                      fg_color="#1f4e79", hover_color="#2980b9",
+                      command=self._refresh_portfolio_tab).pack(side="right", padx=12, pady=10)
+
+        self._pf_frame = ctk.CTkScrollableFrame(tab, fg_color=BG)
+        self._pf_frame.pack(fill="both", expand=True, padx=10, pady=8)
+
+        self._render_portfolio_tab()
+
+    def _render_portfolio_tab(self, results: list[dict] | None = None):
+        for w in self._pf_frame.winfo_children():
+            w.destroy()
+
+        cfg = self._cfg or _load_config()
+        portfolio = {h["symbol"]: h for h in cfg.get("portfolio", [])}
+        if not portfolio:
+            ctk.CTkLabel(self._pf_frame, text="config.yaml 中無持股資料",
+                         text_color=C_GRAY, font=(self.ui_font, 12)).pack(pady=40)
+            return
+
+        scan_price: dict[str, float] = {}
+        scan_signal: dict[str, str]  = {}
+        for r in (self._scan_records or []):
+            s = r["symbol"]
+            scan_price[s]  = r.get("price", 0)
+            sigs = [x["type"] for x in r.get("signals", [])
+                    if x["type"] in ("STRONG BUY","BUY","SELL","WATCH")]
+            scan_signal[s] = (
+                "STRONG BUY" if "STRONG BUY" in sigs else
+                "BUY"        if "BUY"        in sigs else
+                "SELL"       if "SELL"       in sigs else
+                "WATCH"      if "WATCH"      in sigs else "—"
+            )
+
+        from datetime import date as _date
+        today = _date.today()
+
+        total_cost   = 0.0
+        total_value  = 0.0
+        total_pnl    = 0.0
+
+        # 標題列
+        hdr = ctk.CTkFrame(self._pf_frame, fg_color="#0a1020", corner_radius=6)
+        hdr.pack(fill="x", pady=(0, 4))
+        for txt, w in [("代號/名稱", 160), ("股數", 70), ("成本", 80), ("現價", 80),
+                        ("市值", 100), ("損益 NT$", 110), ("損益%", 80),
+                        ("持有天數", 80), ("信號", 90), ("備註", 100)]:
+            ctk.CTkLabel(hdr, text=txt, font=(self.ui_font, 10, "bold"),
+                         text_color="#74b9ff", width=w, anchor="center").pack(side="left", padx=2, pady=4)
+
+        for h in cfg.get("portfolio", []):
+            sym    = h["symbol"]
+            cost   = h.get("cost", 0)
+            shares = h.get("shares", 0)
+            price  = scan_price.get(sym, 0)
+            sig    = scan_signal.get(sym, "—")
+            note   = h.get("note", "")
+
+            # 持有天數
+            buy_date_str = h.get("buy_date", "")
+            hold_days = "—"
+            if buy_date_str:
+                try:
+                    bd = _date.fromisoformat(buy_date_str)
+                    hold_days = str((today - bd).days)
+                except Exception:
+                    pass
+
+            mkt_val = round(price * shares, 0) if price else 0
+            pnl     = round((price - cost) * shares, 0) if price and cost > 0 else 0
+            pnl_pct = round((price - cost) / cost * 100, 1) if price and cost > 0 else None
+
+            if cost > 0:
+                total_cost  += cost * shares
+                total_value += mkt_val
+                total_pnl   += pnl
+
+            pnl_str = f"{'+' if pnl>=0 else ''}{int(pnl):,}" if pnl_pct is not None else "配股"
+            pct_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "—"
+
+            is_profit = pnl_pct is not None and pnl_pct >= 0
+            row_bg = "#0d2d0d" if is_profit else "#2d0d0d"
+            row = ctk.CTkFrame(self._pf_frame, fg_color=row_bg, corner_radius=6)
+            row.pack(fill="x", pady=2)
+
+            sig_color = {
+                "STRONG BUY": C_STRONG, "BUY": C_GREEN,
+                "SELL": C_RED, "WATCH": C_YELLOW,
+            }.get(sig, C_GRAY)
+            pnl_clr = C_GREEN if is_profit else (C_RED if pnl_pct is not None else C_GRAY)
+
+            for val, w, clr in [
+                (f"{sym.replace('.TW','')} {h.get('name','')}", 160, C_WHITE),
+                (str(shares),         70,  C_GRAY),
+                (f"{cost:.2f}" if cost else "配股", 80, C_GRAY),
+                (f"{price:.1f}" if price else "—", 80, C_WHITE),
+                (f"NT${int(mkt_val):,}" if mkt_val else "—", 100, C_WHITE),
+                (pnl_str,              110, pnl_clr),
+                (pct_str,              80,  pnl_clr),
+                (hold_days + " 天" if hold_days != "—" else "—", 80, C_GRAY),
+                (sig,                  90,  sig_color),
+                (note[:10],            100, C_GRAY),
+            ]:
+                ctk.CTkLabel(row, text=val, font=(self.ui_font, 11),
+                             text_color=clr, width=w, anchor="center").pack(side="left", padx=2, pady=5)
+
+        # 合計列
+        if total_cost > 0:
+            tot_pct = round(total_pnl / total_cost * 100, 1)
+            pnl_clr = C_GREEN if total_pnl >= 0 else C_RED
+            foot = ctk.CTkFrame(self._pf_frame, fg_color="#0a1020", corner_radius=6)
+            foot.pack(fill="x", pady=(6, 0))
+            ctk.CTkLabel(foot, text="合計",
+                         font=(self.ui_font, 11, "bold"), text_color=C_BLUE,
+                         width=160, anchor="center").pack(side="left", padx=2, pady=6)
+            for _ in range(3):
+                ctk.CTkLabel(foot, text="", width=80).pack(side="left")
+            ctk.CTkLabel(foot, text=f"NT${int(total_value):,}",
+                         font=(self.ui_font, 11, "bold"), text_color=C_WHITE,
+                         width=100, anchor="center").pack(side="left")
+            ctk.CTkLabel(foot, text=f"{'+' if total_pnl>=0 else ''}{int(total_pnl):,}",
+                         font=(self.ui_font, 11, "bold"), text_color=pnl_clr,
+                         width=110, anchor="center").pack(side="left")
+            ctk.CTkLabel(foot, text=f"{tot_pct:+.1f}%",
+                         font=(self.ui_font, 11, "bold"), text_color=pnl_clr,
+                         width=80, anchor="center").pack(side="left")
+            self._pf_lbl_total.configure(
+                text=f"總市值 NT${int(total_value):,}　未實現損益 NT${'+' if total_pnl>=0 else ''}{int(total_pnl):,}（{tot_pct:+.1f}%）",
+                text_color=pnl_clr)
+
+    def _refresh_portfolio_tab(self):
+        if self._loading:
+            return
+        self._loading = True
+        threading.Thread(target=self._bg_pf_refresh, daemon=True).start()
+
+    def _bg_pf_refresh(self):
+        try:
+            from tw_screener import run_scan
+            records = run_scan()
+            self._scan_records = records
+            self.after(0, lambda: self._render(records))
+            self.after(0, self._render_portfolio_tab)
+        except Exception as e:
+            self.after(0, lambda: self._pf_lbl_total.configure(text=f"刷新失敗：{e}", text_color=C_RED))
+        finally:
+            self._loading = False
+
+    # ════════════════════════════════════════════════════════════════════
+    # 準確度 Tab
+    # ════════════════════════════════════════════════════════════════════
+
+    def _build_accuracy_tab(self, tab):
+        tab.configure(fg_color=BG)
+
+        bar = ctk.CTkFrame(tab, fg_color=BG_PANEL, height=46, corner_radius=0)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        ctk.CTkLabel(bar, text="📊 信號準確度（事後驗證）",
+                     font=(self.ui_font, 13, "bold"), text_color=C_BLUE
+                     ).pack(side="left", padx=16, pady=12)
+        ctk.CTkLabel(bar, text="信號發出後 5 個交易日評分",
+                     font=(self.ui_font, 10), text_color=C_GRAY
+                     ).pack(side="left", padx=4)
+        ctk.CTkButton(bar, text="⟳ 刷新", width=80, font=(self.ui_font, 11),
+                      fg_color="#1f4e79", hover_color="#2980b9",
+                      command=self._refresh_accuracy_tab).pack(side="right", padx=12, pady=10)
+
+        self._acc_frame = ctk.CTkScrollableFrame(tab, fg_color=BG)
+        self._acc_frame.pack(fill="both", expand=True, padx=10, pady=8)
+
+        self._render_accuracy_tab()
+
+    def _render_accuracy_tab(self):
+        for w in self._acc_frame.winfo_children():
+            w.destroy()
+
+        try:
+            from tw_outcome import compute_rolling_accuracy, load_recent_outcomes
+            stats30  = compute_rolling_accuracy(30)
+            stats60  = compute_rolling_accuracy(60)
+            recent   = load_recent_outcomes(15)
+        except Exception as e:
+            ctk.CTkLabel(self._acc_frame, text=f"讀取準確度資料失敗：{e}",
+                         text_color=C_RED, font=(self.ui_font, 12)).pack(pady=40)
+            return
+
+        if not stats30:
+            ctk.CTkLabel(self._acc_frame,
+                         text="尚無事後驗證資料\n\n每次掃描後約 5 個交易日會自動產生驗證結果",
+                         text_color=C_YELLOW, font=(self.ui_font, 12),
+                         justify="center").pack(pady=60)
+            return
+
+        # ── 滾動準確率比較表 ────────────────────────────────────────────
+        ctk.CTkLabel(self._acc_frame, text="滾動準確率比較",
+                     font=(self.ui_font, 12, "bold"), text_color=C_BLUE
+                     ).pack(anchor="w", padx=4, pady=(4, 2))
+
+        tbl = ctk.CTkFrame(self._acc_frame, fg_color="#0a1020", corner_radius=8)
+        tbl.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(tbl, fg_color="#0f1a30")
+        hdr.pack(fill="x", padx=2, pady=(2, 0))
+        for txt, w in [("信號類型", 130), ("近30日 正確/總數", 130), ("近30日 準確率", 110),
+                        ("近30日 平均報酬", 120), ("近60日 準確率", 110), ("近60日 平均報酬", 120)]:
+            ctk.CTkLabel(hdr, text=txt, font=(self.ui_font, 10, "bold"),
+                         text_color="#74b9ff", width=w, anchor="center").pack(side="left", padx=2, pady=4)
+
+        for sig in ("STRONG BUY", "BUY", "SELL"):
+            v30 = (stats30 or {}).get("signals", {}).get(sig, {})
+            v60 = (stats60 or {}).get("signals", {}).get(sig, {})
+            if not v30:
+                continue
+            acc30 = v30.get("accuracy")
+            avg30 = v30.get("avg_pct")
+            acc60 = v60.get("accuracy") if v60 else None
+            avg60 = v60.get("avg_pct")  if v60 else None
+
+            acc_clr = C_GREEN if acc30 and acc30 >= 0.6 else (C_YELLOW if acc30 and acc30 >= 0.4 else C_RED)
+            dr = ctk.CTkFrame(tbl, fg_color="transparent")
+            dr.pack(fill="x", padx=2, pady=1)
+            for val, w, clr in [
+                (sig,                                                   130, C_WHITE),
+                (f"{v30.get('correct',0)}/{v30.get('total',0)}",        130, C_GRAY),
+                (f"{acc30:.0%}" if acc30 is not None else "—",          110, acc_clr),
+                (f"{avg30:+.2f}%" if avg30 is not None else "—",        120, C_GREEN if avg30 and avg30>0 else C_RED),
+                (f"{acc60:.0%}" if acc60 is not None else "—",          110, C_GRAY),
+                (f"{avg60:+.2f}%" if avg60 is not None else "—",        120, C_GRAY),
+            ]:
+                ctk.CTkLabel(dr, text=val, font=(self.ui_font, 11),
+                             text_color=clr, width=w, anchor="center").pack(side="left", padx=2)
+
+        # ── 近期逐筆驗證記錄 ─────────────────────────────────────────────
+        ctk.CTkLabel(self._acc_frame, text="近期驗證記錄（最新 15 筆信號日）",
+                     font=(self.ui_font, 12, "bold"), text_color=C_BLUE
+                     ).pack(anchor="w", padx=4, pady=(8, 2))
+
+        if not recent:
+            ctk.CTkLabel(self._acc_frame, text="無記錄", text_color=C_GRAY,
+                         font=(self.ui_font, 11)).pack(anchor="w", padx=8)
+            return
+
+        rec_hdr = ctk.CTkFrame(self._acc_frame, fg_color="#0f1a30", corner_radius=6)
+        rec_hdr.pack(fill="x", pady=(0, 2))
+        for txt, w in [("信號日", 100), ("評分日", 100), ("代號", 70),
+                        ("信號", 100), ("信號價", 80), ("評分價", 80), ("漲跌", 70), ("結果", 60)]:
+            ctk.CTkLabel(rec_hdr, text=txt, font=(self.ui_font, 10, "bold"),
+                         text_color="#74b9ff", width=w, anchor="center").pack(side="left", padx=2, pady=3)
+
+        for outcome in sorted(recent, key=lambda x: x.get("signal_date",""), reverse=True):
+            sig_date  = outcome.get("signal_date", "")
+            eval_date = outcome.get("eval_date", "")
+            for rec in outcome.get("records", []):
+                pct     = rec.get("pct", 0)
+                correct = rec.get("correct", False)
+                sig     = rec.get("signal", "")
+                r_clr   = C_GREEN if correct else C_RED
+                row = ctk.CTkFrame(self._acc_frame, fg_color="transparent")
+                row.pack(fill="x")
+                for val, w, clr in [
+                    (sig_date,                     100, C_GRAY),
+                    (eval_date,                    100, C_GRAY),
+                    (rec.get("symbol","").replace(".TW",""), 70, C_WHITE),
+                    (sig,                           100, C_STRONG if sig=="STRONG BUY" else C_GREEN if sig=="BUY" else C_RED),
+                    (f"NT${rec.get('signal_price',0):.0f}", 80, C_GRAY),
+                    (f"NT${rec.get('eval_price',0):.0f}",   80, C_GRAY),
+                    (f"{pct:+.1f}%",                70, C_GREEN if pct>0 else C_RED),
+                    ("✅" if correct else "❌",      60, r_clr),
+                ]:
+                    ctk.CTkLabel(row, text=val, font=("Consolas", 10),
+                                 text_color=clr, width=w, anchor="center").pack(side="left", padx=2)
+
+    def _refresh_accuracy_tab(self):
+        threading.Thread(target=lambda: self.after(0, self._render_accuracy_tab), daemon=True).start()
+
+    # ════════════════════════════════════════════════════════════════════
+    # DCA 資產曲線圖
+    # ════════════════════════════════════════════════════════════════════
+
+    def _show_chart_popup(self, sym: str, name: str, dca: dict):
+        import tkinter as tk
+        win = tk.Toplevel(self)
+        win.title(f"{sym.replace('.TW','')} {name}  資產曲線")
+        win.geometry("900x560")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        lbl = tk.Label(win, text="載入價格資料中…",
+                       fg="#74b9ff", bg="#0f1a30",
+                       font=(self.ui_font, 12))
+        lbl.pack(expand=True)
+
+        def _bg():
+            try:
+                import yfinance as yf
+                import pandas as pd
+                from tw_backtest_dca import START_YEAR, END_YEAR, ANNUAL_BUDGET
+
+                ticker = yf.Ticker(sym)
+                df = ticker.history(start=f"{START_YEAR}-01-01",
+                                    end=f"{END_YEAR}-12-31",
+                                    auto_adjust=True)
+                if df.empty or len(df) < 100:
+                    self.after(0, lambda: lbl.configure(text="資料不足，無法繪圖"))
+                    return
+
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo("Asia/Taipei")
+                if df.index.tzinfo is None:
+                    df.index = df.index.tz_localize(tz)
+                else:
+                    df.index = df.index.tz_convert(tz)
+
+                close = df["Close"].dropna()
+                years = range(START_YEAR, END_YEAR + 1)
+                first_td: dict = {}
+                for yr in years:
+                    yd = close[close.index.year == yr]
+                    if not yd.empty:
+                        first_td[yr] = yd.index[0].date().isoformat()
+
+                strategies = dca.get("strategies", [])
+                curves: dict[str, pd.Series] = {}
+                for strat in strategies:
+                    txs = strat.get("transactions", [])
+                    tx_map = {t["date"]: t for t in txs}
+                    shares  = 0.0
+                    cash    = 0.0
+                    pv_vals = []
+                    pv_idx  = []
+                    for dt, price in close.items():
+                        yr       = dt.year
+                        date_str = dt.date().isoformat()
+                        if date_str == first_td.get(yr):
+                            cash += ANNUAL_BUDGET
+                        if date_str in tx_map:
+                            t = tx_map[date_str]
+                            shares += t["shares"]
+                            cash   -= t["cost"]
+                        pv_vals.append(shares * float(price) + cash)
+                        pv_idx.append(dt)
+                    curves[strat["label"]] = pd.Series(pv_vals, index=pv_idx)
+
+                self.after(0, lambda: _draw(win, lbl, curves, close, dca))
+            except Exception as e:
+                self.after(0, lambda: lbl.configure(text=f"繪圖失敗：{e}", fg="#e74c3c"))
+
+        def _draw(win, lbl, curves, close, dca):
+            try:
+                import matplotlib
+                matplotlib.use("TkAgg")
+                import matplotlib.pyplot as plt
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+                import matplotlib.ticker as mticker
+
+                lbl.destroy()
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 5.5),
+                                               gridspec_kw={"height_ratios": [3, 1]},
+                                               facecolor="#0f1a30")
+                fig.subplots_adjust(hspace=0.08, left=0.09, right=0.98, top=0.93, bottom=0.08)
+
+                colors = ["#74b9ff", "#2ecc71", "#1abc9c", "#f39c12", "#e74c3c"]
+                for i, (label, series) in enumerate(curves.items()):
+                    short = label.replace("（無條件）","").replace("（趨勢股，無條件）","")
+                    ax1.plot(series.index, series / 1000, label=short,
+                             color=colors[i % len(colors)], linewidth=1.5)
+
+                strats = dca.get("strategies", [])
+                for strat in strats:
+                    for tx in strat.get("transactions", []):
+                        if not tx.get("fallback"):
+                            try:
+                                import pandas as pd
+                                tx_dt = pd.Timestamp(tx["date"], tz=close.index.tzinfo)
+                                if tx_dt in curves.get(strat["label"], pd.Series()).index:
+                                    y_val = curves[strat["label"]][tx_dt] / 1000
+                                    ax1.axvline(tx_dt, color="#636e72", linewidth=0.4, alpha=0.5)
+                            except Exception:
+                                pass
+
+                ax1.set_facecolor("#0d1b2a")
+                ax1.tick_params(colors="#95a5a6", labelsize=9)
+                ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"NT${x:.0f}K"))
+                ax1.legend(fontsize=8, facecolor="#1a2a40", labelcolor="#ecf0f1",
+                           loc="upper left", framealpha=0.8)
+                ax1.set_title(f"{sym.replace('.TW','')} {name}  資產曲線（NT$ 千元）",
+                              color="#74b9ff", fontsize=11)
+                ax1.grid(color="#1e3a5f", linewidth=0.4)
+                ax1.spines[:].set_color("#2a3a5a")
+                ax1.tick_params(labelbottom=False)
+
+                ax2.fill_between(close.index,
+                                 (close / close.rolling(60).max() - 1) * 100,
+                                 0, alpha=0.4, color="#e74c3c")
+                ax2.axhline(y=-10, color="#f39c12", linewidth=0.6, linestyle="--")
+                ax2.axhline(y=-20, color="#e74c3c", linewidth=0.6, linestyle="--")
+                ax2.set_facecolor("#0d1b2a")
+                ax2.set_ylabel("DD%", color="#95a5a6", fontsize=8)
+                ax2.tick_params(colors="#95a5a6", labelsize=8)
+                ax2.grid(color="#1e3a5f", linewidth=0.3)
+                ax2.spines[:].set_color("#2a3a5a")
+
+                canvas = FigureCanvasTkAgg(fig, master=win)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill="both", expand=True)
+            except ImportError:
+                lbl_new = __import__("tkinter").Label(
+                    win, text="需安裝 matplotlib：pip install matplotlib",
+                    fg="#f39c12", bg="#0f1a30", font=(self.ui_font, 11))
+                lbl.destroy()
+                lbl_new.pack(expand=True)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    # ════════════════════════════════════════════════════════════════════
+    # DCA 敏感度分析
+    # ════════════════════════════════════════════════════════════════════
+
+    def _show_sensitivity_popup(self, sym: str, name: str, dca: dict):
+        import tkinter as tk
+        from tkinter import ttk as _ttk
+
+        win = tk.Toplevel(self)
+        win.title(f"{sym.replace('.TW','')} {name}  參數敏感度分析")
+        win.geometry("700x520")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        tk.Label(win, text=f"{sym.replace('.TW','')} {name}  觸發分析",
+                 fg="#74b9ff", bg="#0f1a30",
+                 font=(self.ui_font, 12, "bold")).pack(anchor="w", padx=14, pady=(10, 4))
+        tk.Label(win, text="根據10年回測交易記錄，分析各策略買入當日的指標分布",
+                 fg="#95a5a6", bg="#0f1a30",
+                 font=("Consolas", 10)).pack(anchor="w", padx=14, pady=(0, 8))
+
+        nb = _ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        strat_style = _ttk.Style(win)
+        strat_style.theme_use("clam")
+        strat_style.configure("Sen.Treeview",
+                              background="#0d1b2a", foreground="#ecf0f1",
+                              fieldbackground="#0d1b2a", rowheight=22,
+                              font=("Consolas", 10))
+        strat_style.configure("Sen.Treeview.Heading",
+                              background="#0a0f1a", foreground="#74b9ff",
+                              font=(self.ui_font, 10, "bold"))
+        strat_style.map("Sen.Treeview", background=[("selected", "#1c4f82")])
+
+        strategies = dca.get("strategies", [])
+
+        for strat in strategies:
+            label = strat["label"]
+            txs   = strat.get("transactions", [])
+            if not txs:
+                continue
+
+            frame = tk.Frame(nb, bg="#0f1a30")
+            nb.add(frame, text=label.replace("（無條件）","").replace("（趨勢股，無條件）",""))
+
+            # 統計數字
+            n_total    = len(txs)
+            n_signal   = sum(1 for t in txs if not t.get("fallback"))
+            n_fallback = sum(1 for t in txs if t.get("fallback"))
+            years_active = sorted({t["date"][:4] for t in txs})
+
+            summary = (
+                f"總買入次數：{n_total}  |  信號觸發：{n_signal}  |  年末強制：{n_fallback}\n"
+                f"有買入的年份：{', '.join(years_active)}"
+            )
+            tk.Label(frame, text=summary, fg="#a0b0c0", bg="#0f1a30",
+                     font=("Consolas", 10), justify="left").pack(anchor="w", padx=10, pady=(8, 4))
+
+            # 觸發條件分布
+            triggered = [t for t in txs if t.get("trigger")]
+            if triggered:
+                tk.Label(frame, text="信號觸發當日指標快照：",
+                         fg="#74b9ff", bg="#0f1a30",
+                         font=(self.ui_font, 10, "bold")).pack(anchor="w", padx=10, pady=(4, 2))
+
+                trigger_keys = []
+                for t in triggered:
+                    for k in t.get("trigger", {}):
+                        if k not in trigger_keys:
+                            trigger_keys.append(k)
+
+                base_cols = ("買入日期", "買入價", "持有報酬%")
+                cols = base_cols + tuple(trigger_keys)
+                widths = (100, 80, 90) + tuple(85 for _ in trigger_keys)
+
+                tree_frame = tk.Frame(frame, bg="#0f1a30")
+                tree_frame.pack(fill="both", expand=True, padx=10, pady=4)
+
+                tree = _ttk.Treeview(tree_frame, style="Sen.Treeview",
+                                     columns=cols, show="headings")
+                for c, w in zip(cols, widths):
+                    tree.heading(c, text=c)
+                    tree.column(c, width=w, anchor="center")
+                tree.tag_configure("fallback", foreground="#636e72")
+
+                fp = strat.get("final_price", 0)
+                for t in txs:
+                    bp    = t.get("price", 0)
+                    ret_s = f"{(fp/bp-1)*100:+.1f}%" if fp > 0 and bp > 0 else "—"
+                    is_fb = t.get("fallback", False)
+                    vals  = (
+                        t.get("date","?") + (" ↩" if is_fb else ""),
+                        f"{bp:,.2f}",
+                        ret_s,
+                    )
+                    if not is_fb:
+                        trig = t.get("trigger", {})
+                        vals += tuple(str(trig.get(k, "—")) for k in trigger_keys)
+                    else:
+                        vals += tuple("↩" for _ in trigger_keys)
+                    tree.insert("", "end", tags=("fallback" if is_fb else "",), values=vals)
+
+                vsb = _ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+                tree.configure(yscrollcommand=vsb.set)
+                tree.pack(side="left", fill="both", expand=True)
+                vsb.pack(side="right", fill="y")
+
+                # 觸發指標統計摘要
+                if triggered and trigger_keys:
+                    stats_lines = []
+                    for k in trigger_keys:
+                        vals_k = []
+                        for t in triggered:
+                            v = t.get("trigger", {}).get(k)
+                            try:
+                                vals_k.append(float(v))
+                            except (TypeError, ValueError):
+                                pass
+                        if vals_k:
+                            import statistics
+                            stats_lines.append(
+                                f"  {k:12}  平均 {statistics.mean(vals_k):+.1f}  "
+                                f"最低 {min(vals_k):+.1f}  最高 {max(vals_k):+.1f}"
+                            )
+                    if stats_lines:
+                        tk.Label(frame, text="觸發時指標統計（僅含信號觸發，不含年末強制）：\n" + "\n".join(stats_lines),
+                                 fg="#a8e6cf", bg="#0f1a30",
+                                 font=("Consolas", 10), justify="left"
+                                 ).pack(anchor="w", padx=10, pady=(4, 8))
+            else:
+                tk.Label(frame,
+                         text="（此策略無觸發條件記錄，可能全為 B&H 或資料版本較舊）",
+                         fg="#636e72", bg="#0f1a30",
+                         font=("Consolas", 10)).pack(anchor="w", padx=10, pady=20)
 
     def _dca_popup(self, transactions: list[dict], stock: str, strategy: str,
                    final_price: float = 0.0):

@@ -39,3 +39,15 @@ jobs:
         run: python tw_scheduler.py --weekly
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: 失敗通知
+        if: failure()
+        run: |
+          python -c "
+          import os, requests
+          url = os.environ.get('DISCORD_WEBHOOK_URL','')
+          if url:
+              requests.post(url, json={'content': '⚠️ **台股週報/DCA回測失敗** — GitHub Actions 執行錯誤，請至 Actions 頁面查看 log'}, timeout=10)
+          "
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

@@ -1,12 +1,50 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-05-04（Session 11 進行中）
+> 上次更新：2026-05-05（Session 11 全部完成）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
-> 最新 commit：1a724e5
+> 最新 commit：見 git log（Session 11 共 4 個 commits）
 
 ---
 
-## Session 11 — 五大改善功能（進行中）
+## Session 11 — 全部完成事項
+
+### Feature 1：追蹤止盈 Trailing Stop（tw_backtest_signals.py）
+- 新增常數 `TRAIL_STOP_PCT = 0.15`（從進場後最高點回落15%觸發）
+- MODES 從 5-tuple 擴展為 7-tuple（加 trail_en, dyn_scale_en）
+- 每個持倉 lot 追蹤 `peak_price`；exit_signal = "TRAILING_STOP"
+- 新增 MODE：`TRAIL`（混合+追蹤止盈）、`ALL_DYN`（混合+動態倉位）
+
+### Feature 2：動態倉位大小 Dynamic Sizing（tw_backtest_signals.py）
+- `size_factor = clamp(1 + rsi_gap + dd_factor, 0.5, 2.0)`
+- RSI < 50 時 rsi_gap > 0（深度超賣加碼）；DD > 10% 時 dd_factor > 0
+
+### Feature 3：Walk-Forward 驗證（tw_backtest_signals.py + tw_ui.py）
+- `run_walk_forward(symbol, name, split_year)` 按中間點切分，跑 in/out sample
+- UI：「🔬 Walk-Forward」按鈕跳出 popup，顯示各策略訓練/驗證期 CAGR 對比
+- popup 底部有穩定性摘要（✅/🟡/⚠️ 幾/幾策略穩定）
+
+### Feature 4：準確度回饋迴路 UI 修正
+- 修正 `_render_accuracy_tab()` schema：`"date"` 非 `"signal_date"`，`"stock_results"` 非 `"records"`
+- 新增「個股準確率排行」區塊，依命中率排序
+
+### Feature 5：板塊相關性控制
+- `tw_screener.py`：新增 `SECTOR` dict（半導體4檔/AI供應鏈2檔/高息ETF4檔）
+- 掃描 tab 底部 `lbl_sector_warn`：同板塊 ≥2 檔 BUY 時顯示 ⚠️ 警告
+
+### 股災應對分析（tw_ui.py 策略綜合評析）
+- `CRASH_PERIODS`：定義中美貿易戰/COVID/升息熊市/日圓套息平倉 4 個事件
+- `_crash_analysis(trades, cs, ce)`：計算每策略在各股災期間的進場/出場次數
+- 策略綜合評析末尾加「📉 歷次股災應對」逐事件分析
+- 建議文字自動融入股災行為（逢低進場次數/追蹤止盈效果/策略保守警告）
+- 改善空間：若股災期間從未進場，提示放寬 RSI 門檻
+
+### 自主 UI 改善（本 Session 末段）
+1. **掃描 tab `vs AVWAP` 欄**：顯示現價 vs AVWAP 的距離 %（負數=低於錨點=買入區域）
+2. **Walk-Forward 穩定性摘要**：popup 底部加一行 ✅/🟡/⚠️ 結論（X/N 策略穩定）
+3. **資產曲線回撤圖股災標注**：在回撤子圖（下方 DD% 面板）標注 CRASH_PERIODS 名稱及紅底色
+4. **策略卡片依 CAGR 排序**：跟單回測結果中，`modes_sorted` 依 CAGR 高至低顯示（最優策略在最上方）
+
+---
 
 ### Feature 1：追蹤止盈 Trailing Stop（tw_backtest_signals.py）
 - 新增常數 `TRAIL_STOP_PCT = 0.15`（從進場後最高點回落15%觸發）

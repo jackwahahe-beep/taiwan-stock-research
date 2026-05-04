@@ -93,19 +93,20 @@ CATEGORY = {
 }
 
 SCAN_COLS = [
-    ("symbol",   "代號",     80,  "w"),
-    ("name",     "名稱",    100,  "w"),
-    ("cat",      "類別",     90,  "center"),
-    ("rec",      "DCA策略",  70,  "center"),
-    ("signal",   "信號",     90,  "center"),
-    ("price",    "現價",     70,  "e"),
-    ("rsi",      "RSI",      50,  "center"),
-    ("avwap",    "AVWAP",    80,  "e"),
-    ("b1",       "試買",     80,  "e"),
-    ("b2",       "加碼",     80,  "e"),
-    ("s_target", "賣出參考", 85,  "e"),
-    ("dd",       "回撤",     60,  "center"),
-    ("pnl",      "持股損益",100,  "e"),
+    ("symbol",    "代號",      80,  "w"),
+    ("name",      "名稱",     100,  "w"),
+    ("cat",       "類別",      90,  "center"),
+    ("rec",       "DCA策略",   70,  "center"),
+    ("signal",    "信號",      90,  "center"),
+    ("price",     "現價",      70,  "e"),
+    ("rsi",       "RSI",       50,  "center"),
+    ("avwap",     "AVWAP",     80,  "e"),
+    ("avwap_dist","vs AVWAP",  68,  "center"),  # 現價 vs AVWAP 距離 %
+    ("b1",        "試買",      80,  "e"),
+    ("b2",        "加碼",      80,  "e"),
+    ("s_target",  "賣出參考",  85,  "e"),
+    ("dd",        "回撤",      60,  "center"),
+    ("pnl",       "持股損益", 100,  "e"),
 ]
 
 
@@ -172,21 +173,24 @@ def _build_scan_rows(scan_records: list[dict], cfg: dict) -> list[dict]:
             else:
                 pnl_str = f"NT${int(price * h['shares']):,} (配股)"
 
+        avwap_dist = round((price / avwap - 1) * 100, 1) if avwap and price else None
         cat, rec = CATEGORY.get(sym, ("—", "—"))
         rows.append({
-            "symbol":   sym.replace(".TW", ""),
-            "name":     r.get("name", sym),
-            "cat":      cat, "rec": rec, "signal": signal,
-            "price":    f"{price:,.1f}" if price else "—",
-            "rsi":      str(r.get("rsi", "—")),
-            "avwap":    f"{avwap:,.1f}" if avwap else "—",
-            "b1":       f"{b1:,.1f}" if b1 else "—",
-            "b2":       f"{b2:,.1f}" if b2 else "—",
-            "s_target": f"{s_target:,.1f}" if s_target else "—",
-            "dd":       f"{r.get('dd_pct', 0):+.1f}%",
-            "pnl":      pnl_str,
+            "symbol":     sym.replace(".TW", ""),
+            "name":       r.get("name", sym),
+            "cat":        cat, "rec": rec, "signal": signal,
+            "price":      f"{price:,.1f}" if price else "—",
+            "rsi":        str(r.get("rsi", "—")),
+            "avwap":      f"{avwap:,.1f}" if avwap else "—",
+            "avwap_dist": f"{avwap_dist:+.1f}%" if avwap_dist is not None else "—",
+            "b1":         f"{b1:,.1f}" if b1 else "—",
+            "b2":         f"{b2:,.1f}" if b2 else "—",
+            "s_target":   f"{s_target:,.1f}" if s_target else "—",
+            "dd":         f"{r.get('dd_pct', 0):+.1f}%",
+            "pnl":        pnl_str,
             "_signal_raw":   signal,
             "_in_portfolio": sym in portfolio,
+            "_avwap_dist":   avwap_dist,  # raw float for tag coloring
         })
     return rows
 
@@ -1444,7 +1448,7 @@ class TwStrategyApp(ctk.CTk):
             self.tree.insert("", "end", tags=(tag,), values=[
                 r["symbol"], r["name"], r["cat"], r["rec"],
                 r["signal"], r["price"], r["rsi"],
-                r["avwap"], r["b1"], r["b2"], r["s_target"],
+                r["avwap"], r["avwap_dist"], r["b1"], r["b2"], r["s_target"],
                 r["dd"], r["pnl"],
             ])
 
@@ -1899,8 +1903,11 @@ class TwStrategyApp(ctk.CTk):
                                  text_color=C_GREEN if beat_d else C_RED,
                                  anchor="center").pack(side="left")
 
-        # ── 各策略卡片（含交易明細按鈕）─────────────────────────────
-        for m in modes:
+        # ── 各策略卡片（含交易明細按鈕，依 CAGR 高至低排序）────────
+        modes_sorted = sorted(modes,
+                              key=lambda m: m["stats"].get("cagr_pct", -999),
+                              reverse=True)
+        for m in modes_sorted:
             s     = m["stats"]
             beat  = s["beats_bnh"]
             trades = m.get("trades", [])
@@ -2322,6 +2329,30 @@ class TwStrategyApp(ctk.CTk):
                                  0, alpha=0.4, color="#e74c3c")
                 ax2.axhline(y=-10, color="#f39c12", linewidth=0.6, linestyle="--")
                 ax2.axhline(y=-20, color="#e74c3c", linewidth=0.6, linestyle="--")
+
+                # 股災事件標注（於回撤子圖底部）
+                try:
+                    import pandas as _pd_c
+                    from zoneinfo import ZoneInfo as _ZI_c
+                    _tz_c = _ZI_c("Asia/Taipei")
+                    _cs_str = result.get("start_date", START_DATE)
+                    _ce_str = result.get("end_date",   END_DATE)
+                    for c_nm, c_s, c_e in CRASH_PERIODS:
+                        if c_s <= _ce_str and c_e >= _cs_str:
+                            try:
+                                _cs_dt = _pd_c.Timestamp(c_s, tz=_tz_c)
+                                _ce_dt = _pd_c.Timestamp(c_e, tz=_tz_c)
+                                ax2.axvspan(_cs_dt, _ce_dt,
+                                            color="#ff6b6b", alpha=0.20, linewidth=0)
+                                ax2.text(_cs_dt, 0.04, f" {c_nm}",
+                                         color="#ffaaaa", fontsize=7,
+                                         transform=ax2.get_xaxis_transform(),
+                                         va="bottom", clip_on=True)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
                 ax2.set_facecolor("#0d1b2a")
                 ax2.set_ylabel("DD%", color="#95a5a6", fontsize=8)
                 ax2.tick_params(colors="#95a5a6", labelsize=8)
@@ -2432,10 +2463,31 @@ class TwStrategyApp(ctk.CTk):
                     f"{delta:+.1f}%",
                 ))
 
+            # ── 穩定性摘要 ───────────────────────────────────────────────────
+            stable = sum(1 for m in wf["modes"] if m.get("cagr_delta", -99) >= -1)
+            mild   = sum(1 for m in wf["modes"] if -4 <= m.get("cagr_delta", -99) < -1)
+            weak   = sum(1 for m in wf["modes"] if m.get("cagr_delta", -99) < -4)
+            total  = len(wf["modes"])
+            if weak >= max(1, total // 2):
+                sum_txt = (f"⚠️ {weak}/{total} 策略退化明顯（CAGR 降幅 > 4%），可能有過擬合風險。"
+                           f"建議重新調整 RSI 閾值或 AVWAP 乘數後再驗證。")
+                sum_clr = "#e74c3c"
+            elif stable >= round(total * 0.6):
+                sum_txt = (f"✅ {stable}/{total} 策略穩定（CAGR 退化 < 1%），"
+                           f"參數在此股票上具可信賴性，可按現有設定操作。")
+                sum_clr = "#2ecc71"
+            else:
+                sum_txt = (f"🟡 {stable} 穩定 / {mild} 輕微退化 / {weak} 明顯退化（共 {total} 策略）。"
+                           f"整體尚可接受，建議優先選用穩定策略（綠色列），並定期重跑驗證。")
+                sum_clr = "#f39c12"
+            tk.Label(win, text=sum_txt,
+                     fg=sum_clr, bg="#0f1a30",
+                     font=(self.ui_font, 10), wraplength=820, justify="left"
+                     ).pack(padx=14, pady=(4, 2), anchor="w")
             # 說明
             tk.Label(win, text="🟢 穩定（CAGR 差 < 1%）   🟡 輕微退化（1–4%）   🔴 明顯退化（> 4%）",
                      fg="#95a5a6", bg="#0f1a30", font=("Consolas", 9)
-                     ).pack(side="bottom", pady=6)
+                     ).pack(side="bottom", pady=4)
 
         threading.Thread(target=_bg, daemon=True).start()
 

@@ -1601,6 +1601,23 @@ class TwStrategyApp(ctk.CTk):
             ctk.CTkLabel(info, text=txt, font=(self.ui_font, 10),
                          text_color=clr).pack(side="left", padx=6, pady=5)
 
+        # ── 推薦策略欄 ────────────────────────────────────────────────
+        bm = result.get("best_mode", {})
+        if bm:
+            bm_is_bnh = bm.get("mode") == "BNH"
+            bm_color  = C_YELLOW if bm_is_bnh else C_GREEN
+            bm_icon   = "📌" if bm_is_bnh else "★"
+            bm_txt    = (f"{bm_icon} 推薦：{bm['label']}  "
+                         f"CAGR {bm['cagr']:+.1f}%"
+                         + (f"  MDD {bm['mdd']:.1f}%  Calmar {bm['calmar']:.2f}" if bm.get("mdd") else "")
+                         + f"  │  {bm['reason']}")
+            rec_bar = ctk.CTkFrame(self._sbt_detail, fg_color="#0d2010" if not bm_is_bnh else "#1a1a00",
+                                   corner_radius=6)
+            rec_bar.pack(fill="x", padx=12, pady=(0, 6))
+            ctk.CTkLabel(rec_bar, text=bm_txt,
+                         font=(self.ui_font, 10, "bold"), text_color=bm_color
+                         ).pack(side="left", padx=10, pady=5)
+
         # ── 摘要比較表 ────────────────────────────────────────────────
         annual_bgt = bnh.get("annual_budget", p.get("annual_budget", 100_000))
         ctk.CTkLabel(self._sbt_detail,
@@ -1763,11 +1780,13 @@ class TwStrategyApp(ctk.CTk):
             ret  = s["return_pct"]
             pnl  = s["total_pnl"]
             cagr = s.get("cagr_pct", 0)
-            s_mdd  = s.get("mdd_pct", 0)
-            s_fees = s.get("total_fees", 0)
+            s_mdd    = s.get("mdd_pct", 0)
+            s_fees   = s.get("total_fees", 0)
+            s_calmar = s.get("calmar", 0)
             for label, val, clr in [
                 ("報酬率",   f"{ret:+.1f}%",              C_GREEN if ret>=0 else C_RED),
                 ("CAGR",    f"{cagr:+.1f}%",              C_GREEN if cagr>=0 else C_RED),
+                ("Calmar",  f"{s_calmar:.2f}",            C_GREEN if s_calmar>=0.3 else (C_YELLOW if s_calmar>=0.1 else C_GRAY)),
                 ("總損益",   f"NT${pnl:+,.0f}",            C_GREEN if pnl>=0 else C_RED),
                 ("MDD",     f"{s_mdd:.1f}%",              "#e17055" if s_mdd < -20 else (C_YELLOW if s_mdd < -10 else C_GRAY)),
                 ("手續費+稅", f"NT${s_fees:,.0f}",          C_GRAY),
@@ -1899,7 +1918,7 @@ class TwStrategyApp(ctk.CTk):
 
         # 說明列
         legend = tk.Frame(win, bg="#0f1a30")
-        legend.pack(fill="x", padx=10, pady=(0, 6))
+        legend.pack(fill="x", padx=10, pady=(0, 4))
         for txt, clr in [
             ("🟢 獲利出場", "#2ecc71"),
             ("  🔴 虧損出場", "#e74c3c"),
@@ -1909,6 +1928,31 @@ class TwStrategyApp(ctk.CTk):
         ]:
             tk.Label(legend, text=txt, fg=clr, bg="#0f1a30",
                      font=("Consolas", 9)).pack(side="left", padx=4)
+
+        # 逐年損益表
+        _yr_frame = tk.Frame(win, bg="#0a1020")
+        _yr_frame.pack(fill="x", padx=10, pady=(0, 8))
+        tk.Label(_yr_frame, text="逐年損益  ",
+                 fg="#74b9ff", bg="#0a1020",
+                 font=("Consolas", 9, "bold")).pack(side="left")
+
+        # 計算逐年損益
+        from collections import defaultdict
+        yr_pnl: dict = defaultdict(float)
+        yr_fee: dict = defaultdict(float)
+        yr_cnt: dict = defaultdict(int)
+        for t in trades:
+            yr = t.get("exit_date", "")[:4]
+            if yr:
+                yr_pnl[yr] += t.get("pnl", 0)
+                yr_fee[yr] += t.get("fees", 0)
+                yr_cnt[yr] += 1
+        for yr in sorted(yr_pnl):
+            p   = yr_pnl[yr]
+            clr = "#2ecc71" if p >= 0 else "#e74c3c"
+            txt = f"{yr}: {p:+,.0f}({yr_cnt[yr]}筆)  "
+            tk.Label(_yr_frame, text=txt, fg=clr, bg="#0a1020",
+                     font=("Consolas", 9)).pack(side="left")
 
 
 def main():

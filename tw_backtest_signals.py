@@ -303,7 +303,7 @@ def _stats(trades: list[dict], bnh_ret: float = 0.0,
                 "total_pnl": 0, "return_pct": 0.0, "cagr_pct": 0.0,
                 "avg_hold_days": 0, "best_pct": 0.0, "worst_pct": 0.0,
                 "beats_bnh": False, "n_open_end": 0,
-                "mdd_pct": round(mdd_pct, 1), "total_fees": 0}
+                "mdd_pct": round(mdd_pct, 1), "total_fees": 0, "calmar": 0.0}
     deployed = sum(t["cost"] for t in trades)
     pnl      = sum(t["pnl"]  for t in trades)
     n_win    = sum(1 for t in trades if t["pnl"] > 0)
@@ -311,6 +311,8 @@ def _stats(trades: list[dict], bnh_ret: float = 0.0,
     ret      = round(pnl / base * 100, 2) if base > 0 else 0.0
     final_v  = base + pnl
     cagr     = round(((final_v / base) ** (1 / years) - 1) * 100, 1) if base > 0 and years > 0 else 0.0
+    # Calmar ratio：CAGR / abs(MDD)，衡量風險調整後報酬
+    calmar   = round(cagr / abs(mdd_pct), 2) if mdd_pct != 0 else 0.0
     return {
         "n_trades":       len(trades),
         "n_wins":         n_win,
@@ -320,6 +322,7 @@ def _stats(trades: list[dict], bnh_ret: float = 0.0,
         "total_pnl":      round(pnl, 0),
         "return_pct":     ret,
         "cagr_pct":       cagr,
+        "calmar":         calmar,
         "avg_hold_days":  round(sum(t["hold_days"] for t in trades) / len(trades)),
         "best_pct":       round(max(t["pnl_pct"] for t in trades), 2),
         "worst_pct":      round(min(t["pnl_pct"] for t in trades), 2),
@@ -418,6 +421,25 @@ def run_signal_backtest(symbol: str, name: str,
             "stats": st, "trades": trades,
         })
 
+    # 推薦策略：Calmar ratio 最高且超越 B&H 的模式
+    beating = [m for m in modes_out if m["stats"]["beats_bnh"] and m["stats"]["n_trades"] > 0]
+    if beating:
+        best = max(beating, key=lambda m: m["stats"]["calmar"])
+        best_mode = {
+            "mode":   best["mode"],
+            "label":  best["label"],
+            "cagr":   best["stats"]["cagr_pct"],
+            "mdd":    best["stats"]["mdd_pct"],
+            "calmar": best["stats"]["calmar"],
+            "reason": f"Calmar最佳={best['stats']['calmar']:.2f}，超越B&H {bnh_cagr:+.1f}%",
+        }
+    else:
+        best_mode = {
+            "mode": "BNH", "label": "B&H（年初買入）",
+            "cagr": bnh_cagr, "mdd": None, "calmar": 0,
+            "reason": "所有信號策略均未超越B&H，建議直接持有",
+        }
+
     return {
         "symbol":        symbol,
         "name":          name,
@@ -426,6 +448,7 @@ def run_signal_backtest(symbol: str, name: str,
         "bnh":           bnh,
         "sig_counts":    sc,
         "modes":         modes_out,
+        "best_mode":     best_mode,
         "params": {
             "annual_budget":   annual_budget,
             "sbuy_mult":       SBUY_MULT,

@@ -1,8 +1,8 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-04-30（Session 8 完成）
+> 上次更新：2026-05-04（Session 9 進行中）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
-> 最新 commit：（Session 8 完成後更新）
+> 最新 commit：b8921ca
 
 ---
 
@@ -202,13 +202,55 @@ python tw_scheduler.py --outcome
 
 ---
 
-## Session 8 待辦（信號跟單回測 + UI Tab，上個 Session 遺留）
+## Session 9 完成事項（2026-05-04）
+
+### 手續費+交易稅 + MDD
+- `COMMISSION_RATE = 0.001425`（買賣），`TAX_RATE = 0.003`（僅賣出）
+- 每筆交易附帶 `fees` 欄位；B&H 也同樣扣費以確保比較公平
+- `_simulate()` 回傳 `(trades, total_injected, max_dd_pct)`
+- MDD：逐日追蹤 `cash + open_lots 市值`，對比歷史峰值
+- UI：比較表加 MDD%/手續費NT$ 欄；卡片加 MDD+費用指標；彈窗加費用欄位
+
+### 股票清單調整
+- config.yaml：加入統一超 2912.TW；2408/3037 加 `backtest_only: true`
+- tw_screener.py：`run_scan()` 過濾 `backtest_only`，推播 12 檔（移除 2408/3037）
+- tw_screener.py：加入 2912.TW 的 SIGNAL_CONFIG（防禦型，rsi_buy=42）
+
+### 回測年份可選
+- `run_signal_backtest(start_date, end_date)` 完全參數化
+- 動態 `max_inject_yrs = end_year - start_year`（準確解決 off-by-one）
+- UI 工具列加年份選單（2010–2025），cache key 帶日期範圍
+- 切換年份自動清除結果、重設按鈕顏色
+- `[研]` 標示僅回測（backtest_only）的股票
+
+### 交易明細彈窗 — 逐年損益列
+- 彈窗底部加逐年損益橫排（出場年份 × PnL × 筆數）
+- 綠/紅色分別標示盈虧年
+
+---
+
+## Session 8 完成事項（2026-04-30）
+
+### ABCD 四項策略優化 — tw_backtest_signals.py + tw_ui.py
+
+| # | 代號 | 說明 | 實作細節 |
+|---|---|---|---|
+| A | **年末強制部署** | 若全年未觸發 BUY/SBUY，最後交易日部署全部現金 | `year_last_days` + `deployed_this_year` 標記 |
+| B | **TRIM 門檻 30%** | 從 15% 提升，避免牛市過早止盈 | `TRIM_PROFIT = 30.0`；MODES label 改「混合+止盈30%策略」 |
+| C | **ETF 跳過 SELL** | ETF 長期持有，RSI 很難達到 SELL 閾值 | `ETF_SYMBOLS` 常量 + `is_etf = symbol in ETF_SYMBOLS` |
+| D | **SBUY 全倉出擊** | 深度回調 = 最大配置機會，部署全部積累現金 | `spend = cash`（移除 LOT_SBUY 上限） |
+
+---
+
+## Session 8 待辦（已完成）
 
 - [x] 信號回測核心（tw_backtest_signals.py）
 - [x] UI 加入跟單回測 Tab（tw_ui.py）
 - [x] tw_scheduler.py 加 `--signal-bt` 旗標
-- [x] ABCD 策略優化（Session 8）
-- [ ] 重新執行 `python tw_scheduler.py --signal-bt` 以刷新快取
+- [x] ABCD 策略優化
+- [x] 手續費+MDD
+- [x] 回測年份可選
+- [x] 統一超加入 + 2408/3037 backtest_only
 
 ---
 

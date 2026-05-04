@@ -44,6 +44,8 @@ SIGNAL_CONFIG = {
     "3037.TW":   {"rsi_buy": 48, "rsi_sbuy": 38, "rsi_sell": 72, "b1": 0.97, "b2": 0.91, "s": 1.13, "bnh_dca": True},
     "2408.TW":   {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 70, "b1": 0.97, "b2": 0.91, "s": 1.12},
     "6770.TW":   {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 70, "b1": 0.97, "b2": 0.91, "s": 1.12},
+    # 防禦型消費 — 統一超（7-Eleven），低波動，RSI 門檻放寬
+    "2912.TW":   {"rsi_buy": 42, "rsi_sbuy": 32, "rsi_sell": 72, "b1": 0.97, "b2": 0.92, "s": 1.10},
 }
 _DEFAULT_CFG = {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 70, "b1": 0.97, "b2": 0.92, "s": 1.12}
 

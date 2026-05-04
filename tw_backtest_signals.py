@@ -25,10 +25,11 @@ TRIM_PROFIT   = 30.0      # % 單筆獲利達此門檻 → TRIM 出場（B：從
 
 # (mode_id, label, buy_en, sbuy_en, trim_en)
 MODES = [
-    ("BUY",   "BUY 策略",          True,  False, False),
-    ("SBUY",  "STRONG BUY 策略",   False, True,  False),
-    ("ALL",   "混合策略",           True,  True,  False),
-    ("TRIM",  "混合+止盈30% 策略",  True,  True,  True ),
+    ("BUY",     "BUY 策略",              True,  False, False),
+    ("SBUY",    "STRONG BUY 策略",       False, True,  False),
+    ("ALL",     "混合策略",               True,  True,  False),
+    ("TRIM",    "混合+止盈30% 策略",      True,  True,  True ),
+    ("TRIM_MF", "混合+止盈+大盤MA200過濾", True,  True,  True ),
 ]
 
 # C：ETF 不觸發 SELL（高息ETF 幾乎不會達到 SELL 閾值，且長期持有更佳）
@@ -49,6 +50,25 @@ def _fetch(symbol: str, start: str = START_DATE, end: str = END_DATE) -> pd.Data
                 if df.index.tzinfo is None
                 else df.index.tz_convert(TZ))
     return df
+
+
+def _fetch_twii_bull_series(start: str, end: str) -> pd.Series:
+    """
+    大盤牛熊旗標：True = 牛市（TWII MA200 的 20 日斜率 > 0），False = 熊市。
+    熊市期間回測大盤過濾模式會跳過 BUY 進場（STRONG BUY 不受影響）。
+    往前多拉 300 天給 MA200 預熱，避免期初全為 NaN。
+    """
+    pad_start = (pd.Timestamp(start) - pd.Timedelta(days=300)).strftime("%Y-%m-%d")
+    twii = yf.Ticker("^TWII").history(start=pad_start, end=end, auto_adjust=True)
+    if twii.empty or len(twii) < 200:
+        return pd.Series(dtype=bool)
+    close = twii["Close"].dropna()
+    close.index = (close.index.tz_localize(TZ)
+                   if close.index.tzinfo is None
+                   else close.index.tz_convert(TZ))
+    ma200 = close.rolling(200).mean()
+    bull  = ma200.diff(20) > 0          # 20 交易日斜率 > 0 = 牛市
+    return bull[bull.index >= pd.Timestamp(start, tz=TZ)]
 
 
 # ── 滾動 AVWAP（與 tw_screener.calc_avwap 邏輯一致）──────────────────────
@@ -127,7 +147,8 @@ def _simulate(sig: pd.DataFrame,
               buy_en: bool, sbuy_en: bool, trim_en: bool,
               annual_budget: float = ANNUAL_BUDGET,
               symbol: str = "",
-              max_inject_years: int = MAX_INJECT_YEARS) -> tuple[list[dict], float, float]:
+              max_inject_years: int = MAX_INJECT_YEARS,
+              bull_flags: "pd.Series | None" = None) -> tuple[list[dict], float, float]:
     """
     年度注資 + 信號跟單模擬，含手續費/交易稅與 MDD 追蹤。
     A：全年未部署 → 年末強制部署全部現金（FALLBACK）。
@@ -241,13 +262,21 @@ def _simulate(sig: pd.DataFrame,
             })
             return True
 
+        # 大盤 MA200 斜率過濾：熊市期間跳過 BUY（STRONG BUY 不受影響）
+        in_bull = True
+        if bull_flags is not None and len(bull_flags) > 0:
+            flag_val = bull_flags.asof(dt)
+            if not pd.isna(flag_val):
+                in_bull = bool(flag_val)
+
         # 3. BUY 進場（edge-triggered）
         if (not just_sold and curr_sig == "BUY" and buy_en
-                and prev_sig != "BUY" and cash >= LOT_BUY * 0.3):
+                and prev_sig != "BUY" and cash >= LOT_BUY * 0.3
+                and in_bull):
             if _buy_lot("BUY", min(cash, LOT_BUY)):
                 deployed_this_year = True
 
-        # 4. STRONG BUY 進場（edge-triggered，D：全倉出擊）
+        # 4. STRONG BUY 進場（edge-triggered，D：全倉出擊；不受大盤過濾影響）
         elif (not just_sold and curr_sig == "STRONG BUY" and sbuy_en
               and prev_sig != "STRONG BUY" and cash >= LOT_BUY * 0.3):
             if _buy_lot("STRONG BUY", cash):
@@ -406,10 +435,22 @@ def run_signal_backtest(symbol: str, name: str,
     print(f"    信號統計  STRONG BUY×{sc.get('STRONG BUY',0)}"
           f"  BUY×{sc.get('BUY',0)}  SELL×{sc.get('SELL',0)}")
 
+    # 大盤 MA200 斜率旗標（僅 TRIM_MF 模式使用）
+    bull_flags = None
+    try:
+        bull_flags = _fetch_twii_bull_series(start_date, end_date)
+        bear_days = int((~bull_flags).sum())
+        bull_days = int(bull_flags.sum())
+        print(f"    大盤過濾旗標：牛市 {bull_days}日 / 熊市 {bear_days}日（共 {len(bull_flags)}日）")
+    except Exception as e:
+        print(f"    [!] TWII 資料失敗，大盤過濾停用：{e}")
+
     modes_out = []
     for mode_id, label, buy_en, sbuy_en, trim_en in MODES:
+        use_mf = (mode_id == "TRIM_MF")
         trades, injected, mdd = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget,
-                                          symbol=symbol, max_inject_years=max_inject_yrs)
+                                          symbol=symbol, max_inject_years=max_inject_yrs,
+                                          bull_flags=bull_flags if use_mf else None)
         st = _stats(trades, bnh_ret, total_injected=injected, years=years, mdd_pct=mdd)
         flag = "[+]" if st["beats_bnh"] else "[-]"
         print(f"    {flag} {label:<20}  {st['n_trades']:>2}trade  "

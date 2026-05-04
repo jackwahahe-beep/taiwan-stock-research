@@ -1934,14 +1934,43 @@ class TwStrategyApp(ctk.CTk):
                                                facecolor="#0f1a30")
                 fig.subplots_adjust(hspace=0.08, left=0.09, right=0.98, top=0.93, bottom=0.08)
 
-                colors = ["#74b9ff", "#2ecc71", "#1abc9c", "#f39c12", "#e74c3c"]
+                colors = ["#74b9ff", "#2ecc71", "#1abc9c", "#f39c12", "#e74c3c", "#a29bfe"]
                 for i, (label, series) in enumerate(curves.items()):
                     if series is not None and len(series) > 0:
-                        lw = 2.0 if "B&H" in label else 1.4
+                        lw = 2.0 if "B&H" in label else (1.8 if "過濾" in label else 1.4)
                         ls = "--" if "B&H" in label else "-"
                         ax1.plot(series.index, series / 1000, label=label,
                                  color=colors[i % len(colors)],
                                  linewidth=lw, linestyle=ls)
+
+                # 熊市期間（TWII MA200 斜率 ≤ 0）灰底標示
+                try:
+                    import yfinance as _yf
+                    from zoneinfo import ZoneInfo as _ZI
+                    _tz = _ZI("Asia/Taipei")
+                    _start = result.get("start_date", START_DATE)
+                    _end   = result.get("end_date",   END_DATE)
+                    _bf = None
+                    from tw_backtest_signals import _fetch_twii_bull_series
+                    _bf = _fetch_twii_bull_series(_start, _end)
+                    if _bf is not None and len(_bf) > 0:
+                        _bear = _bf[~_bf]
+                        if len(_bear) > 0:
+                            _in_bear = False
+                            _bear_start = None
+                            for _dt, _val in _bf.items():
+                                if not _val and not _in_bear:
+                                    _in_bear = True
+                                    _bear_start = _dt
+                                elif _val and _in_bear:
+                                    ax1.axvspan(_bear_start, _dt,
+                                                color="#e74c3c", alpha=0.08, linewidth=0)
+                                    _in_bear = False
+                            if _in_bear and _bear_start:
+                                ax1.axvspan(_bear_start, _bf.index[-1],
+                                            color="#e74c3c", alpha=0.08, linewidth=0)
+                except Exception:
+                    pass
 
                 ax1.set_facecolor("#0d1b2a")
                 ax1.tick_params(colors="#95a5a6", labelsize=9)

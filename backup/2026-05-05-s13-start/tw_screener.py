@@ -224,18 +224,6 @@ def calc_signals(df: pd.DataFrame, cfg: dict, symbol: str = "") -> dict:
     if np.isnan(price_val) or np.isnan(rsi_val):
         return {}
 
-    # 週線 RSI（將日線收盤重採樣至週線後計算）
-    weekly_rsi_val: float | None = None
-    try:
-        weekly_close = close.resample("W").last().dropna()
-        if len(weekly_close) >= 15:
-            w_rsi = calc_rsi(weekly_close, 14)
-            v = float(w_rsi.iloc[-1])
-            if not np.isnan(v):
-                weekly_rsi_val = round(v, 1)
-    except Exception:
-        pass
-
     # AVWAP + DD
     avwap = calc_avwap(df, lookback=60)
     dd    = calc_drawdown(close, lookback=60)
@@ -245,16 +233,15 @@ def calc_signals(df: pd.DataFrame, cfg: dict, symbol: str = "") -> dict:
     s  = avwap * stock_cfg["s"]
 
     latest = {
-        "price":      round(price_val, 2),
-        "rsi":        round(rsi_val, 1),
-        "weekly_rsi": weekly_rsi_val,
-        "ma_fast":    round(float(ma_fast.iloc[-1]), 2),
-        "ma_slow":    round(float(ma_slow.iloc[-1]), 2),
-        "avwap":      round(avwap, 2),
-        "dd_pct":     round(dd * 100, 1),
-        "volume":     int(volume.iloc[-1]),
-        "vol_ma20":   int(vol_ma20.iloc[-1]),
-        "signals":    [],
+        "price":    round(price_val, 2),
+        "rsi":      round(rsi_val, 1),
+        "ma_fast":  round(float(ma_fast.iloc[-1]), 2),
+        "ma_slow":  round(float(ma_slow.iloc[-1]), 2),
+        "avwap":    round(avwap, 2),
+        "dd_pct":   round(dd * 100, 1),
+        "volume":   int(volume.iloc[-1]),
+        "vol_ma20": int(vol_ma20.iloc[-1]),
+        "signals":  [],
     }
 
     # ── 買入信號 ──────────────────────────────────────────────────────────────
@@ -315,14 +302,6 @@ def calc_signals(df: pd.DataFrame, cfg: dict, symbol: str = "") -> dict:
         latest["signals"].append({
             "type": "WATCH",
             "reason": f"成交量爆量 {spike_ratio}x 均量",
-        })
-
-    # ── 週線 RSI 偏高警示（買入信號時提醒逆勢風險）─────────────────────────
-    if (weekly_rsi_val is not None and weekly_rsi_val > 65
-            and any(s["type"] in ("BUY", "STRONG BUY") for s in latest["signals"])):
-        latest["signals"].append({
-            "type": "WATCH",
-            "reason": f"週線RSI {weekly_rsi_val:.0f} 偏高，日線為逆勢超賣反彈，建議謹慎",
         })
 
     return latest

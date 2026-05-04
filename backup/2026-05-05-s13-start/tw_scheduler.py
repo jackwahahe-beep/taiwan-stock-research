@@ -177,45 +177,6 @@ def run_signal_bt():
     print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
 
 
-def backfill_outcomes():
-    """補評所有已有足夠交易日的歷史掃描信號（自動跳過已評分的日期）。"""
-    import holidays as _holidays
-    from tw_outcome import grade_date, LOOK_AHEAD, OUTCOME_DIR, CACHE_DIR
-
-    today   = datetime.now(TZ).date()
-    scored  = 0
-
-    for f in sorted(CACHE_DIR.glob("scan_*.json")):
-        scan_date_str = f.stem.replace("scan_", "")
-        try:
-            scan_date = date.fromisoformat(scan_date_str)
-        except ValueError:
-            continue
-
-        out_file = OUTCOME_DIR / f"outcome_{scan_date_str}.json"
-        if out_file.exists():
-            print(f"[backfill] {scan_date_str} 已評分，跳過")
-            continue
-
-        tw_hols  = _holidays.TW(years=[scan_date.year, today.year])
-        td_count = 0
-        d = scan_date + timedelta(days=1)
-        while d <= today:
-            if d.weekday() < 5 and d not in tw_hols:
-                td_count += 1
-            d += timedelta(days=1)
-
-        if td_count >= LOOK_AHEAD:
-            print(f"[backfill] 補評 {scan_date_str}（已過 {td_count} 交易日）")
-            result = grade_date(scan_date_str)
-            if result:
-                scored += 1
-        else:
-            print(f"[backfill] {scan_date_str} 距今 {td_count} 交易日，尚不足 {LOOK_AHEAD} 日，跳過")
-
-    print(f"\n[backfill] 完成，補評 {scored} 筆")
-
-
 if __name__ == "__main__":
     if "--daemon" in sys.argv:
         run_daemon()
@@ -225,8 +186,6 @@ if __name__ == "__main__":
         run_weekly_report()
     elif "--signal-bt" in sys.argv:
         run_signal_bt()
-    elif "--backfill" in sys.argv:
-        backfill_outcomes()
     elif "--outcome" in sys.argv:
         from tw_outcome import grade_date, compute_rolling_accuracy
         target = sys.argv[2] if len(sys.argv) > 2 else None

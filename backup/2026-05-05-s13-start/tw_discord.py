@@ -119,12 +119,11 @@ def _dca_context_line(symbol: str, dca_cache: dict) -> str | None:
 
 def build_buy_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
                     sbt_cache: dict | None = None) -> dict:
-    budget      = cfg.get("trade_budget", 100000)
-    price       = stock["price"]
-    avwap       = stock.get("avwap", 0)
-    dd_pct      = stock.get("dd_pct", 0)
-    rsi         = stock["rsi"]
-    weekly_rsi  = stock.get("weekly_rsi")
+    budget   = cfg.get("trade_budget", 100000)
+    price    = stock["price"]
+    avwap    = stock.get("avwap", 0)
+    dd_pct   = stock.get("dd_pct", 0)
+    rsi      = stock["rsi"]
     market_mode = stock.get("market_mode", "NORMAL")
 
     buy_types = {s["type"] for s in stock["signals"] if s["type"] in ("BUY", "STRONG BUY")}
@@ -143,11 +142,9 @@ def build_buy_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
     title_icon = "🟢🟢 強力買入信號" if is_strong else "🟢 買入信號"
 
     fields = [
-        {"name": "現價",            "value": f"`NT${price}`", "inline": True},
-        {"name": "RSI（日/週）",
-         "value": f"`{rsi}`" + (f"  週 `{weekly_rsi}`" if weekly_rsi else ""),
-         "inline": True},
-        {"name": "DD / AVWAP距離", "value": f"`{dd_pct}%` / `{avwap_diff}`", "inline": True},
+        {"name": "現價",          "value": f"`NT${price}`", "inline": True},
+        {"name": "RSI",           "value": f"`{rsi}`",      "inline": True},
+        {"name": "DD / AVWAP距離","value": f"`{dd_pct}%` / `{avwap_diff}`", "inline": True},
         {"name": "📌 建議進場",
          "value": f"掛單價 `NT${price}`　買 `{suggested_shares}` 股　預估成本 `NT${estimated_cost:,.0f}`",
          "inline": False},
@@ -198,7 +195,6 @@ def build_sell_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
     price      = stock["price"]
     avwap      = stock.get("avwap", 0)
     rsi        = stock["rsi"]
-    weekly_rsi = stock.get("weekly_rsi")
     dd_pct     = stock.get("dd_pct", 0)
     budget     = cfg.get("trade_budget", 100_000)
     stock_cfg  = SIGNAL_CONFIG.get(sym, _DEFAULT_CFG)
@@ -218,10 +214,8 @@ def build_sell_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
     title_prefix = "🔴 賣出信號（持股）" if in_portfolio else "🔴 賣出信號（觀察）"
 
     fields = [
-        {"name": "現價",            "value": f"`NT${price}`",    "inline": True},
-        {"name": "RSI（日/週）",
-         "value": f"`{rsi}`" + (f"  週 `{weekly_rsi}`" if weekly_rsi else ""),
-         "inline": True},
+        {"name": "現價",           "value": f"`NT${price}`",    "inline": True},
+        {"name": "RSI",            "value": f"`{rsi}`",          "inline": True},
         {"name": "DD / AVWAP距離", "value": f"`{dd_pct}%` / `{avwap_dist}`", "inline": True},
         {"name": "📌 策略目標出場",
          "value": (
@@ -525,13 +519,13 @@ def build_weekly_embed(cache_dir: Path, days: int = 7) -> dict | None:
     if not daily:
         return None
 
-    # 市場模式分布 + 信號累計 + 本週漲跌幅追蹤
+    # 市場模式分布
     mode_count: dict[str, int] = {"NORMAL": 0, "WARN": 0, "RISK": 0}
+    # 每股信號累計
     signal_tally: dict[str, dict[str, int]] = {}
-    last_prices:  dict[str, float] = {}   # 最新價（daily[0] = 最新）
-    first_prices: dict[str, tuple[str, float]] = {}  # 最舊價（daily[-1]）
 
-    for day_records in daily:   # newest → oldest
+    for day_records in daily:
+        # 市場模式：每天只計一次（取第一筆）
         if day_records:
             day_mode = day_records[0].get("market_mode", "NORMAL")
             if day_mode in mode_count:
@@ -539,20 +533,13 @@ def build_weekly_embed(cache_dir: Path, days: int = 7) -> dict | None:
 
         for r in day_records:
             sym = r["symbol"]
-            name = r.get("name", sym)
-            p    = r.get("price", 0)
-
             if sym not in signal_tally:
-                signal_tally[sym] = {"name": name, "STRONG BUY": 0, "BUY": 0, "SELL": 0}
+                signal_tally[sym] = {"name": r.get("name", sym),
+                                     "STRONG BUY": 0, "BUY": 0, "SELL": 0}
             for s in r.get("signals", []):
                 t = s.get("type", "")
                 if t in signal_tally[sym]:
                     signal_tally[sym][t] += 1
-
-            if p > 0:
-                if sym not in last_prices:
-                    last_prices[sym] = p          # 首次遇到 = 最新一天
-                first_prices[sym] = (name, p)    # 持續覆蓋 = 最終為最舊一天
 
     actual_days = len(daily)
     mode_line = (
@@ -588,38 +575,6 @@ def build_weekly_embed(cache_dir: Path, days: int = 7) -> dict | None:
     if not lines:
         lines.append("本週無明確買入/賣出信號")
 
-    # 本週漲跌幅排行
-    week_perf: dict[str, dict] = {}
-    for sym, (name, start_p) in first_prices.items():
-        end_p = last_prices.get(sym, start_p)
-        if start_p > 0:
-            week_perf[sym] = {"name": name,
-                              "pct":  round((end_p / start_p - 1) * 100, 2)}
-    sorted_perf = sorted(week_perf.items(), key=lambda x: x[1]["pct"], reverse=True)
-    winners = [(s, v) for s, v in sorted_perf[:3] if v["pct"] > 0]
-    losers  = [(s, v) for s, v in sorted_perf[-3:][::-1] if v["pct"] < 0]
-
-    perf_parts: list[str] = []
-    if winners:
-        perf_parts.append("📈 **本週漲幅**")
-        for sym, v in winners:
-            perf_parts.append(f"🔺 `{sym.replace('.TW','')} {v['name']}`  **+{v['pct']:.2f}%**")
-    if losers:
-        if perf_parts:
-            perf_parts.append("")
-        perf_parts.append("📉 **本週跌幅**")
-        for sym, v in losers:
-            perf_parts.append(f"🔻 `{sym.replace('.TW','')} {v['name']}`  **{v['pct']:.2f}%**")
-
-    # 信號股 SBT 策略建議
-    sbt_cache = _load_sbt_cache()
-    sbt_lines: list[str] = []
-    for sym in sorted_syms[:5]:
-        line = _sbt_context_line(sym, sbt_cache)
-        if line:
-            name = active[sym]["name"]
-            sbt_lines.append(f"**{sym.replace('.TW','')} {name}**\n{line}")
-
     # 信號正確率（近 30 日 outcome）
     _LOOK_AHEAD = 5   # 與 tw_outcome.LOOK_AHEAD 一致
     accuracy_fields = []
@@ -644,28 +599,14 @@ def build_weekly_embed(cache_dir: Path, days: int = 7) -> dict | None:
     except Exception:
         pass
 
-    extra_fields = []
-    if perf_parts:
-        extra_fields.append({
-            "name":    "📊 本週漲跌幅排行",
-            "value":   "\n".join(perf_parts),
-            "inline":  False,
-        })
-    if sbt_lines:
-        extra_fields.append({
-            "name":    "📋 信號股建議策略",
-            "value":   "\n\n".join(sbt_lines),
-            "inline":  False,
-        })
-
     return {
         "color":       COLOR["INFO"],
         "title":       f"📋 台股週報｜{(today - timedelta(days=actual_days-1)).isoformat()} ～ {today.isoformat()}",
         "description": "\n".join(lines),
         "fields": [
             {"name": "市場模式分布", "value": mode_line, "inline": False},
-            {"name": "統計天數",     "value": f"{actual_days} 個交易日", "inline": True},
-        ] + extra_fields + accuracy_fields,
+            {"name": "統計天數",     "value": f"{actual_days} 個交易日",   "inline": True},
+        ] + accuracy_fields,
         "footer": {"text": f"每週五自動發送　{datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}"},
     }
 

@@ -1,31 +1,8 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-05-05（Session 13 完成）
+> 上次更新：2026-05-04（Session 12 完成）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
 > 最新 commit：見 git log
-
----
-
-## Session 13 — 完成事項
-
-### A1：信號準確度補評工具（tw_scheduler.py）
-- 新增 `backfill_outcomes()` 函數：掃描所有 `cache/scan_*.json`，對距今 ≥ 5 交易日的日期自動補評
-- 新增 `--backfill` 參數：`python tw_scheduler.py --backfill`
-- 現有掃描只有 2026-04-29 / 04-30，需等 2026-05-07 才會有足夠交易日可評
-- 準確度 UI tab 已有空資料提示（無需更改）
-
-### A2：週報強化（tw_discord.py `build_weekly_embed()`）
-- 追蹤每股本週第一/最後價格，計算漲跌幅
-- 新增 "📊 本週漲跌幅排行" field：前3漲幅（🔺）+ 前3跌幅（🔻）
-- 新增 "📋 信號股建議策略" field：對本週有 BUY/SELL 信號的前5股，附上 SBT 最佳策略建議
-- 載入 `_load_sbt_cache()` + `_sbt_context_line()` 已在 tw_discord 中（Session 12 加入）
-
-### A3：週線 RSI 確認（tw_screener.py + tw_discord.py）
-- `calc_signals()` 新增週線 RSI 計算：daily close `resample("W").last()` 後跑 RSI(14)
-- 結果存入 `latest["weekly_rsi"]`（None 若資料不足）
-- 若週線 RSI > 65 且有 BUY/STRONG BUY 信號，追加 WATCH 提示「週線RSI偏高，日線為逆勢」
-- `build_buy_embed()` / `build_sell_embed()` RSI 欄改為 "RSI（日/週）" 顯示兩個數值
-- 0050.TW 測試：日線 RSI 83.8，週線 RSI 79.3，運作正常
 
 ---
 

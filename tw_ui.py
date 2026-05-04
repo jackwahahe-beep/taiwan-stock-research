@@ -49,6 +49,7 @@ CATEGORY = {
     "2303.TW":  ("中型科技", "B&H"),
     "2382.TW":  ("AI伺服器", "B&H"),
     "2308.TW":  ("電源散熱", "強買"),
+    "2912.TW":  ("防禦消費", "B&H"),
     "3037.TW":  ("趨勢強股", "B&H"),
     "2408.TW":  ("記憶體",   "BUY"),
 }
@@ -1585,6 +1586,12 @@ class TwStrategyApp(ctk.CTk):
                           f"{result.get('start_date','')} → {result.get('end_date','')}",
                      font=(self.ui_font, 13, "bold"), text_color=C_BLUE
                      ).pack(side="left")
+        ctk.CTkButton(hdr, text="📈 資產曲線",
+                      font=(self.ui_font, 10), width=90, height=24,
+                      fg_color="#1a3040", hover_color="#2a4a60",
+                      text_color="#74b9ff",
+                      command=lambda: self._sbt_chart_popup(sym, name, result),
+                      ).pack(side="right", padx=4)
 
         # ── 信號統計 + 回測設定 ───────────────────────────────────────
         info = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=6)
@@ -1803,6 +1810,171 @@ class TwStrategyApp(ctk.CTk):
                              font=(self.ui_font, 9), text_color=C_GRAY).pack()
                 ctk.CTkLabel(col, text=val,
                              font=(self.ui_font, 11, "bold"), text_color=clr).pack()
+
+    # ════════════════════════════════════════════════════════════════════
+    # 跟單回測 資產曲線圖
+    # ════════════════════════════════════════════════════════════════════
+
+    def _sbt_equity_series(self, trades: list[dict], close,
+                           annual_budget: float, max_inject_yrs: int,
+                           start_yr: int, is_bnh: bool = False):
+        """Reconstruct daily portfolio equity from trade records + price series."""
+        import pandas as pd
+
+        entries_by_date: dict = {}
+        exits_by_date:   dict = {}
+        for t in trades:
+            ed   = t.get("entry_date", "")
+            xd   = t.get("exit_date", "")
+            xsig = t.get("exit_signal", "")
+            sh   = t.get("shares", 0)
+            co   = t.get("cost", 0)
+            pr   = t.get("proceeds", 0)
+            if ed:
+                entries_by_date.setdefault(ed, []).append({"shares": sh, "cost": co})
+            if xd and xsig != "PERIOD_END":
+                exits_by_date.setdefault(xd, []).append({"shares": sh, "proceeds": pr})
+
+        seen_years:  set   = set()
+        inject_count: int  = 0
+        cash:        float = 0.0
+        open_shares: float = 0.0
+        equity_vals        = []
+        equity_idx         = []
+
+        for dt, price in close.items():
+            yr       = dt.year
+            date_str = dt.date().isoformat()
+
+            if yr not in seen_years:
+                seen_years.add(yr)
+                if inject_count < max_inject_yrs:
+                    cash         += annual_budget
+                    inject_count += 1
+
+            for ex in exits_by_date.get(date_str, []):
+                open_shares -= ex["shares"]
+                cash        += ex["proceeds"]
+
+            for en in entries_by_date.get(date_str, []):
+                open_shares += en["shares"]
+                cash        -= en["cost"]
+
+            equity_vals.append(cash + open_shares * float(price))
+            equity_idx.append(dt)
+
+        return pd.Series(equity_vals, index=pd.Index(equity_idx))
+
+    def _sbt_chart_popup(self, sym: str, name: str, result: dict):
+        import tkinter as tk
+        win = tk.Toplevel(self)
+        win.title(f"{sym.replace('.TW', '')} {name}  跟單回測資產曲線")
+        win.geometry("900x560")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        lbl = tk.Label(win, text="載入價格資料中…",
+                       fg="#74b9ff", bg="#0f1a30",
+                       font=(self.ui_font, 12))
+        lbl.pack(expand=True)
+
+        def _bg():
+            try:
+                import yfinance as yf
+                import pandas as pd
+                from zoneinfo import ZoneInfo
+
+                start    = result.get("start_date", START_DATE)
+                end      = result.get("end_date",   END_DATE)
+                start_yr = int(start[:4])
+                end_yr   = int(end[:4])
+                max_inject_yrs = end_yr - start_yr
+
+                annual_budget = result.get("params", {}).get("annual_budget", 100_000)
+
+                tz = ZoneInfo("Asia/Taipei")
+                ticker = yf.Ticker(sym)
+                df = ticker.history(start=start, end=end, auto_adjust=True)
+                if df.empty or len(df) < 100:
+                    self.after(0, lambda: lbl.configure(text="資料不足，無法繪圖"))
+                    return
+
+                if df.index.tzinfo is None:
+                    df.index = df.index.tz_localize(tz)
+                else:
+                    df.index = df.index.tz_convert(tz)
+                close = df["Close"].dropna()
+
+                curves: dict[str, pd.Series] = {}
+
+                bnh_txs = result.get("bnh", {}).get("transactions", [])
+                curves["B&H（年初買入）"] = self._sbt_equity_series(
+                    bnh_txs, close, annual_budget, max_inject_yrs, start_yr, is_bnh=True)
+
+                for m in result.get("modes", []):
+                    curves[m["label"]] = self._sbt_equity_series(
+                        m.get("trades", []), close, annual_budget,
+                        max_inject_yrs, start_yr)
+
+                self.after(0, lambda: _draw(win, lbl, curves, close))
+            except Exception as e:
+                self.after(0, lambda: lbl.configure(text=f"繪圖失敗：{e}", fg="#e74c3c"))
+
+        def _draw(win, lbl, curves, close):
+            try:
+                import matplotlib
+                matplotlib.use("TkAgg")
+                import matplotlib.pyplot as plt
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+                import matplotlib.ticker as mticker
+
+                lbl.destroy()
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 5.5),
+                                               gridspec_kw={"height_ratios": [3, 1]},
+                                               facecolor="#0f1a30")
+                fig.subplots_adjust(hspace=0.08, left=0.09, right=0.98, top=0.93, bottom=0.08)
+
+                colors = ["#74b9ff", "#2ecc71", "#1abc9c", "#f39c12", "#e74c3c"]
+                for i, (label, series) in enumerate(curves.items()):
+                    if series is not None and len(series) > 0:
+                        lw = 2.0 if "B&H" in label else 1.4
+                        ls = "--" if "B&H" in label else "-"
+                        ax1.plot(series.index, series / 1000, label=label,
+                                 color=colors[i % len(colors)],
+                                 linewidth=lw, linestyle=ls)
+
+                ax1.set_facecolor("#0d1b2a")
+                ax1.tick_params(colors="#95a5a6", labelsize=9)
+                ax1.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda x, _: f"NT${x:.0f}K"))
+                ax1.legend(fontsize=8, facecolor="#1a2a40", labelcolor="#ecf0f1",
+                           loc="upper left", framealpha=0.8)
+                ax1.set_title(f"{sym.replace('.TW', '')} {name}  信號策略資產曲線（NT$ 千元）",
+                              color="#74b9ff", fontsize=11)
+                ax1.grid(color="#1e3a5f", linewidth=0.4)
+                ax1.spines[:].set_color("#2a3a5a")
+                ax1.tick_params(labelbottom=False)
+
+                ax2.fill_between(close.index,
+                                 (close / close.rolling(60).max() - 1) * 100,
+                                 0, alpha=0.4, color="#e74c3c")
+                ax2.axhline(y=-10, color="#f39c12", linewidth=0.6, linestyle="--")
+                ax2.axhline(y=-20, color="#e74c3c", linewidth=0.6, linestyle="--")
+                ax2.set_facecolor("#0d1b2a")
+                ax2.set_ylabel("DD%", color="#95a5a6", fontsize=8)
+                ax2.tick_params(colors="#95a5a6", labelsize=8)
+                ax2.grid(color="#1e3a5f", linewidth=0.3)
+                ax2.spines[:].set_color("#2a3a5a")
+
+                canvas = FigureCanvasTkAgg(fig, master=win)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill="both", expand=True)
+            except ImportError:
+                tk.Label(win, text="需安裝 matplotlib：pip install matplotlib",
+                         fg="#f39c12", bg="#0f1a30",
+                         font=(self.ui_font, 11)).pack(expand=True)
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _sbt_trade_popup(self, trades: list[dict], stock: str, mode_label: str):
         import tkinter as tk

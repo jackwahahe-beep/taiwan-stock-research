@@ -1,8 +1,38 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-05-04（Session 10 完成）
+> 上次更新：2026-05-04（Session 11 進行中）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
-> 最新 commit：df6ad9c
+> 最新 commit：1a724e5
+
+---
+
+## Session 11 — 五大改善功能（進行中）
+
+### Feature 1：追蹤止盈 Trailing Stop（tw_backtest_signals.py）
+- 新增常數 `TRAIL_STOP_PCT = 0.15`（從進場後最高點回落15%觸發）
+- 新增 2 個 MODES：`TRAIL`（混合+追蹤止盈）、`TRAIL_MF`（追蹤止盈+MA200過濾）
+- 每個持倉 lot 追蹤 `peak_price`；exit_signal = "TRAILING_STOP"
+
+### Feature 2：動態倉位大小 Dynamic Sizing（tw_backtest_signals.py）
+- 依 RSI 深度 + DD 深度計算 `size_factor`（0.5x–2.0x）
+- 新增 MODE：`ALL_DYN`（混合策略+動態倉位）
+- 公式：`size_factor = clamp(rsi_gap/rsi_buy + abs(dd_pct)/20, 0.5, 2.0)`
+
+### Feature 3：Walk-Forward 驗證（tw_backtest_signals.py + tw_ui.py）
+- 新增函數 `run_walk_forward(symbol, name, split_year, ...)`
+  - 以 split_year 切分：in-sample (start→split) / out-of-sample (split→end)
+  - 兩段都用相同參數跑，對比 CAGR/Calmar 是否退化
+- tw_ui.py：在 _sbt_show_result() 加「🔬 Walk-Forward」按鈕，跳出比較 popup
+
+### Feature 4：準確度回饋迴路（tw_scheduler.py + tw_ui.py）
+- tw_scheduler.py：每次推播 BUY/STRONG BUY 後記錄到 `cache/signal_log.json`
+  - 格式：`{symbol, signal_type, price, date}`
+- 新增函數 `check_signal_outcomes()`：對每筆記錄查 5/10/20 日後報酬
+- tw_ui.py 準確度 tab：顯示信號命中率統計表
+
+### Feature 5：板塊相關性控制（tw_screener.py + tw_ui.py）
+- tw_screener.py：新增 `SECTOR` dict（半導體、ETF、電源、消費...）
+- tw_ui.py 掃描 tab：目前 BUY 訊號按板塊分組，標示同板塊過度集中（≥2支同板塊 BUY 時警告）
 
 ---
 

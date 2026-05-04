@@ -21,15 +21,18 @@ END_DATE      = "2025-12-31"
 ANNUAL_BUDGET = 100_000   # NT$ 每年注資金額（可由呼叫方覆寫）
 MAX_INJECT_YEARS = 10     # 最多注資年數（避免跨 11 個日曆年超過預期）
 SBUY_MULT     = 1.5       # STRONG BUY 單筆投入倍率（相對 ANNUAL_BUDGET）
-TRIM_PROFIT   = 30.0      # % 單筆獲利達此門檻 → TRIM 出場（B：從15%提升至30%）
+TRIM_PROFIT   = 30.0      # % 單筆獲利達此門檻 → TRIM 出場
+TRAIL_STOP_PCT = 0.15     # 追蹤止盈：從持倉最高點回落 15% 觸發出場
 
-# (mode_id, label, buy_en, sbuy_en, trim_en)
+# (mode_id, label, buy_en, sbuy_en, trim_en, trail_en, dyn_scale_en)
 MODES = [
-    ("BUY",     "BUY 策略",              True,  False, False),
-    ("SBUY",    "STRONG BUY 策略",       False, True,  False),
-    ("ALL",     "混合策略",               True,  True,  False),
-    ("TRIM",    "混合+止盈30% 策略",      True,  True,  True ),
-    ("TRIM_MF", "混合+止盈+大盤MA200過濾", True,  True,  True ),
+    ("BUY",     "BUY 策略",              True,  False, False, False, False),
+    ("SBUY",    "STRONG BUY 策略",       False, True,  False, False, False),
+    ("ALL",     "混合策略",               True,  True,  False, False, False),
+    ("TRIM",    "混合+止盈30% 策略",      True,  True,  True,  False, False),
+    ("TRIM_MF", "混合+止盈+大盤MA200過濾", True,  True,  True,  False, False),
+    ("TRAIL",   "混合+追蹤止盈15%",       True,  True,  False, True,  False),
+    ("ALL_DYN", "混合+動態倉位",           True,  True,  False, False, True ),
 ]
 
 # C：ETF 不觸發 SELL（高息ETF 幾乎不會達到 SELL 閾值，且長期持有更佳）
@@ -148,13 +151,17 @@ def _simulate(sig: pd.DataFrame,
               annual_budget: float = ANNUAL_BUDGET,
               symbol: str = "",
               max_inject_years: int = MAX_INJECT_YEARS,
-              bull_flags: "pd.Series | None" = None) -> tuple[list[dict], float, float]:
+              bull_flags: "pd.Series | None" = None,
+              trail_en: bool = False,
+              dyn_scale_en: bool = False) -> tuple[list[dict], float, float]:
     """
     年度注資 + 信號跟單模擬，含手續費/交易稅與 MDD 追蹤。
     A：全年未部署 → 年末強制部署全部現金（FALLBACK）。
     B：TRIM 門檻 30%（淨獲利）。
     C：ETF 跳過 SELL。
     D：STRONG BUY 部署全部積累現金。
+    trail_en：從持倉最高點回落 TRAIL_STOP_PCT 觸發出場。
+    dyn_scale_en：依 RSI 深度 + DD 深度動態縮放 BUY 倉位（0.5x–2.0x）。
     費用：買進 COMMISSION_RATE；賣出 COMMISSION_RATE + TAX_RATE。
     回傳 (trades, total_injected, max_drawdown_pct)。
     """
@@ -203,6 +210,12 @@ def _simulate(sig: pd.DataFrame,
             all_fees = s_fee + lot.get("buy_fee", 0)
             return net, pnl, all_fees
 
+        # 0. 追蹤止盈：更新各持倉最高點
+        if trail_en:
+            for lot in open_lots:
+                if price > lot.get("peak_price", lot["entry_price"]):
+                    lot["peak_price"] = price
+
         # 1. TRIM：淨獲利達門檻即出清（B：門檻 30%）
         if trim_en and open_lots:
             keep = []
@@ -225,6 +238,28 @@ def _simulate(sig: pd.DataFrame,
             open_lots = keep
 
         just_sold = False
+
+        # 1b. TRAILING STOP：持倉從最高點回落 ≥ TRAIL_STOP_PCT 則出場
+        if trail_en and open_lots:
+            keep = []
+            for lot in open_lots:
+                peak = lot.get("peak_price", lot["entry_price"])
+                if price <= peak * (1 - TRAIL_STOP_PCT):
+                    net, pnl, all_fees = _sell_net(lot, price)
+                    hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
+                    trades.append({**lot,
+                                   "exit_date": date_str, "exit_price": round(price, 2),
+                                   "proceeds": round(net, 0), "pnl": round(pnl, 0),
+                                   "pnl_pct": round(pnl / lot["cost"] * 100, 2),
+                                   "hold_days": hd, "exit_signal": "TRAILING_STOP",
+                                   "fees": round(all_fees, 0),
+                                   "exit_cond": {"RSI": round(rsi, 1), "vs_AVWAP%": vs_avwap,
+                                                 "peak→now%": round((price / peak - 1) * 100, 1)}})
+                    cash += net
+                    just_sold = True
+                else:
+                    keep.append(lot)
+            open_lots = keep
 
         # 2. SELL：關閉所有持倉（C：ETF 跳過）
         if curr_sig == "SELL" and open_lots and not is_etf:
@@ -256,7 +291,7 @@ def _simulate(sig: pd.DataFrame,
             open_lots.append({
                 "entry_date": date_str, "entry_price": round(price, 2),
                 "shares": shares, "cost": round(cost, 0), "entry_signal": signal_name,
-                "buy_fee": b_fee,
+                "buy_fee": b_fee, "peak_price": price,
                 "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
                                "vs_AVWAP%": vs_avwap},
             })
@@ -269,11 +304,19 @@ def _simulate(sig: pd.DataFrame,
             if not pd.isna(flag_val):
                 in_bull = bool(flag_val)
 
+        # 動態倉位：依 RSI 深度 + DD 深度縮放 BUY 金額（0.5x–2.0x）
+        if dyn_scale_en:
+            rsi_gap   = max(0.0, (50 - rsi) / 50)
+            dd_factor = max(0.0, (abs(dd) - 10) / 10)
+            size_factor = max(0.5, min(2.0, 1.0 + rsi_gap + dd_factor))
+        else:
+            size_factor = 1.0
+
         # 3. BUY 進場（edge-triggered）
         if (not just_sold and curr_sig == "BUY" and buy_en
                 and prev_sig != "BUY" and cash >= LOT_BUY * 0.3
                 and in_bull):
-            if _buy_lot("BUY", min(cash, LOT_BUY)):
+            if _buy_lot("BUY", min(cash, LOT_BUY * size_factor)):
                 deployed_this_year = True
 
         # 4. STRONG BUY 進場（edge-triggered，D：全倉出擊；不受大盤過濾影響）
@@ -446,11 +489,12 @@ def run_signal_backtest(symbol: str, name: str,
         print(f"    [!] TWII 資料失敗，大盤過濾停用：{e}")
 
     modes_out = []
-    for mode_id, label, buy_en, sbuy_en, trim_en in MODES:
+    for mode_id, label, buy_en, sbuy_en, trim_en, trail_en, dyn_scale_en in MODES:
         use_mf = (mode_id == "TRIM_MF")
         trades, injected, mdd = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget,
                                           symbol=symbol, max_inject_years=max_inject_yrs,
-                                          bull_flags=bull_flags if use_mf else None)
+                                          bull_flags=bull_flags if use_mf else None,
+                                          trail_en=trail_en, dyn_scale_en=dyn_scale_en)
         st = _stats(trades, bnh_ret, total_injected=injected, years=years, mdd_pct=mdd)
         flag = "[+]" if st["beats_bnh"] else "[-]"
         print(f"    {flag} {label:<20}  {st['n_trades']:>2}trade  "
@@ -497,6 +541,93 @@ def run_signal_backtest(symbol: str, name: str,
             "commission_rate": round(COMMISSION_RATE * 100, 4),
             "tax_rate":        round(TAX_RATE * 100, 2),
         },
+    }
+
+
+def run_walk_forward(symbol: str, name: str,
+                     annual_budget: float = ANNUAL_BUDGET,
+                     start_date: str = START_DATE,
+                     end_date: str = END_DATE,
+                     split_year: int = 2021) -> dict:
+    """
+    Walk-forward 驗證：
+      - in-sample  : [start_date, split_year-01-01)
+      - out-of-sample : [split_year-01-01, end_date]
+    兩段用相同參數跑，比對 CAGR/Calmar 是否退化（過擬合的跡象）。
+    """
+    split_date = f"{split_year}-01-01"
+    df = _fetch(symbol, start=start_date, end=end_date)
+    if df.empty or len(df) < 200:
+        return {"symbol": symbol, "name": name, "error": "資料不足"}
+
+    sig = _daily_signals(df, symbol)
+    if len(sig) < 100:
+        return {"symbol": symbol, "name": name, "error": "指標計算資料不足"}
+
+    sig_in  = sig[sig.index < pd.Timestamp(split_date, tz=TZ)]
+    sig_out = sig[sig.index >= pd.Timestamp(split_date, tz=TZ)]
+
+    if len(sig_in) < 60 or len(sig_out) < 60:
+        return {"symbol": symbol, "name": name, "error": f"切分後資料不足（in={len(sig_in)}, out={len(sig_out)}）"}
+
+    # B&H 基準（兩段）
+    def _bnh_cagr(s: pd.DataFrame) -> float:
+        if s.empty:
+            return 0.0
+        ep = float(s["close"].iloc[0])
+        xp = float(s["close"].iloc[-1])
+        yrs = max(0.1, (s.index[-1] - s.index[0]).days / 365.25)
+        return round((xp / ep) ** (1 / yrs) * 100 - 100, 1)
+
+    bnh_in  = _bnh_cagr(sig_in)
+    bnh_out = _bnh_cagr(sig_out)
+
+    years_in  = max(1.0, (sig_in.index[-1]  - sig_in.index[0]).days  / 365.25)
+    years_out = max(1.0, (sig_out.index[-1] - sig_out.index[0]).days / 365.25)
+    inject_in  = int(pd.Timestamp(split_date).year - pd.Timestamp(start_date).year)
+    inject_out = int(pd.Timestamp(end_date).year   - pd.Timestamp(split_date).year)
+
+    results = []
+    for mode_id, label, buy_en, sbuy_en, trim_en, trail_en, dyn_scale_en in MODES:
+        tr_in,  inj_in,  mdd_in  = _simulate(sig_in,  buy_en, sbuy_en, trim_en, annual_budget,
+                                              symbol=symbol, max_inject_years=inject_in,
+                                              trail_en=trail_en, dyn_scale_en=dyn_scale_en)
+        tr_out, inj_out, mdd_out = _simulate(sig_out, buy_en, sbuy_en, trim_en, annual_budget,
+                                              symbol=symbol, max_inject_years=inject_out,
+                                              trail_en=trail_en, dyn_scale_en=dyn_scale_en)
+        st_in  = _stats(tr_in,  bnh_in,  total_injected=inj_in,  years=years_in,  mdd_pct=mdd_in)
+        st_out = _stats(tr_out, bnh_out, total_injected=inj_out, years=years_out, mdd_pct=mdd_out)
+        # 退化比例：out-of-sample CAGR vs in-sample CAGR
+        degrade = (st_out["cagr_pct"] - st_in["cagr_pct"])
+        results.append({
+            "mode":      mode_id,
+            "label":     label,
+            "in_sample": {
+                "period":    f"{start_date[:4]}–{split_year-1}",
+                "cagr":      st_in["cagr_pct"],
+                "calmar":    st_in.get("calmar", 0),
+                "mdd":       st_in.get("mdd_pct", 0),
+                "n_trades":  st_in["n_trades"],
+                "beats_bnh": st_in["beats_bnh"],
+            },
+            "out_sample": {
+                "period":    f"{split_year}–{end_date[:4]}",
+                "cagr":      st_out["cagr_pct"],
+                "calmar":    st_out.get("calmar", 0),
+                "mdd":       st_out.get("mdd_pct", 0),
+                "n_trades":  st_out["n_trades"],
+                "beats_bnh": st_out["beats_bnh"],
+            },
+            "cagr_delta": round(degrade, 1),
+        })
+
+    return {
+        "symbol":    symbol,
+        "name":      name,
+        "split_year": split_year,
+        "bnh_in_cagr":  bnh_in,
+        "bnh_out_cagr": bnh_out,
+        "modes":     results,
     }
 
 

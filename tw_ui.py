@@ -297,6 +297,9 @@ class TwStrategyApp(ctk.CTk):
         self.lbl_summary = ctk.CTkLabel(bot, text="",
                                         font=(self.ui_font, 11), text_color=C_GRAY)
         self.lbl_summary.pack(side="left", padx=20, pady=8)
+        self.lbl_sector_warn = ctk.CTkLabel(bot, text="",
+                                            font=(self.ui_font, 11), text_color=C_YELLOW)
+        self.lbl_sector_warn.pack(side="right", padx=20, pady=8)
 
     # ════════════════════════════════════════════════════════════════════
     # 回測 Tab
@@ -856,6 +859,47 @@ class TwStrategyApp(ctk.CTk):
                 ctk.CTkLabel(dr, text=val, font=(self.ui_font, 11),
                              text_color=clr, width=w, anchor="center").pack(side="left", padx=2)
 
+        # ── 個股準確率排行 ────────────────────────────────────────────────
+        ctk.CTkLabel(self._acc_frame, text="個股準確率（近 30 日，按 BUY/SBUY 正確率排序）",
+                     font=(self.ui_font, 12, "bold"), text_color=C_BLUE
+                     ).pack(anchor="w", padx=4, pady=(8, 2))
+
+        stock_acc: dict = {}
+        for o in load_recent_outcomes(30):
+            for sym, r in o.get("stock_results", {}).items():
+                if r.get("correct") is None:
+                    continue
+                if sym not in stock_acc:
+                    stock_acc[sym] = {"name": r.get("name",""), "c": 0, "t": 0, "pnl": []}
+                stock_acc[sym]["t"] += 1
+                stock_acc[sym]["c"] += int(r["correct"])
+                if r.get("actual_pct") is not None:
+                    stock_acc[sym]["pnl"].append(r["actual_pct"])
+
+        if stock_acc:
+            stk_row = ctk.CTkFrame(self._acc_frame, fg_color="#0a1020", corner_radius=6)
+            stk_row.pack(fill="x", pady=(0, 10))
+            hdr2 = ctk.CTkFrame(stk_row, fg_color="#0f1a30")
+            hdr2.pack(fill="x", padx=2, pady=(2,0))
+            for txt, w in [("代號", 70), ("名稱", 100), ("正確/總數", 90), ("正確率", 80), ("平均報酬", 90)]:
+                ctk.CTkLabel(hdr2, text=txt, font=(self.ui_font, 10, "bold"),
+                             text_color="#74b9ff", width=w, anchor="center").pack(side="left", padx=2, pady=3)
+            for sym, v in sorted(stock_acc.items(), key=lambda x: -(x[1]["c"]/max(x[1]["t"],1))):
+                acc = v["c"] / v["t"]
+                avg = sum(v["pnl"]) / len(v["pnl"]) if v["pnl"] else None
+                aclr = C_GREEN if acc >= 0.6 else (C_YELLOW if acc >= 0.4 else C_RED)
+                dr2 = ctk.CTkFrame(stk_row, fg_color="transparent")
+                dr2.pack(fill="x", padx=2, pady=1)
+                for val, w, clr in [
+                    (sym.replace(".TW",""),        70, C_WHITE),
+                    (v["name"][:8],               100, C_GRAY),
+                    (f"{v['c']}/{v['t']}",         90, C_GRAY),
+                    (f"{acc:.0%}",                 80, aclr),
+                    (f"{avg:+.2f}%" if avg else "—", 90, C_GREEN if avg and avg>0 else C_RED),
+                ]:
+                    ctk.CTkLabel(dr2, text=val, font=("Consolas", 10),
+                                 text_color=clr, width=w, anchor="center").pack(side="left", padx=2)
+
         # ── 近期逐筆驗證記錄 ─────────────────────────────────────────────
         ctk.CTkLabel(self._acc_frame, text="近期驗證記錄（最新 15 筆信號日）",
                      font=(self.ui_font, 12, "bold"), text_color=C_BLUE
@@ -868,30 +912,30 @@ class TwStrategyApp(ctk.CTk):
 
         rec_hdr = ctk.CTkFrame(self._acc_frame, fg_color="#0f1a30", corner_radius=6)
         rec_hdr.pack(fill="x", pady=(0, 2))
-        for txt, w in [("信號日", 100), ("評分日", 100), ("代號", 70),
-                        ("信號", 100), ("信號價", 80), ("評分價", 80), ("漲跌", 70), ("結果", 60)]:
+        for txt, w in [("信號日", 100), ("看N日後", 70), ("代號", 70),
+                        ("信號", 100), ("信號價", 85), ("報酬%", 75), ("結果", 60)]:
             ctk.CTkLabel(rec_hdr, text=txt, font=(self.ui_font, 10, "bold"),
                          text_color="#74b9ff", width=w, anchor="center").pack(side="left", padx=2, pady=3)
 
-        for outcome in sorted(recent, key=lambda x: x.get("signal_date",""), reverse=True):
-            sig_date  = outcome.get("signal_date", "")
-            eval_date = outcome.get("eval_date", "")
-            for rec in outcome.get("records", []):
-                pct     = rec.get("pct", 0)
+        for outcome in sorted(recent, key=lambda x: x.get("date",""), reverse=True):
+            sig_date  = outcome.get("date", "")
+            look      = outcome.get("look_ahead", 5)
+            for sym, rec in outcome.get("stock_results", {}).items():
+                pct     = rec.get("actual_pct") or 0.0
                 correct = rec.get("correct", False)
                 sig     = rec.get("signal", "")
+                entry_p = rec.get("entry_price")
                 r_clr   = C_GREEN if correct else C_RED
                 row = ctk.CTkFrame(self._acc_frame, fg_color="transparent")
                 row.pack(fill="x")
                 for val, w, clr in [
-                    (sig_date,                     100, C_GRAY),
-                    (eval_date,                    100, C_GRAY),
-                    (rec.get("symbol","").replace(".TW",""), 70, C_WHITE),
-                    (sig,                           100, C_STRONG if sig=="STRONG BUY" else C_GREEN if sig=="BUY" else C_RED),
-                    (f"NT${rec.get('signal_price',0):.0f}", 80, C_GRAY),
-                    (f"NT${rec.get('eval_price',0):.0f}",   80, C_GRAY),
-                    (f"{pct:+.1f}%",                70, C_GREEN if pct>0 else C_RED),
-                    ("✅" if correct else "❌",      60, r_clr),
+                    (sig_date,                       100, C_GRAY),
+                    (f"+{look}日",                    70, C_GRAY),
+                    (sym.replace(".TW",""),            70, C_WHITE),
+                    (sig,                             100, C_STRONG if sig=="STRONG BUY" else C_GREEN if sig=="BUY" else C_RED),
+                    (f"NT${entry_p:.0f}" if entry_p else "—", 85, C_GRAY),
+                    (f"{pct:+.1f}%",                  75, C_GREEN if pct>0 else C_RED),
+                    ("✅" if correct else "❌",         60, r_clr),
                 ]:
                     ctk.CTkLabel(row, text=val, font=("Consolas", 10),
                                  text_color=clr, width=w, anchor="center").pack(side="left", padx=2)
@@ -1382,6 +1426,21 @@ class TwStrategyApp(ctk.CTk):
                  "　（試買=AVWAP×b1  加碼=AVWAP×b2  賣出=AVWAP×s）"
         )
 
+        # 板塊集中警告：同板塊 ≥2 檔同時出現 BUY/STRONG BUY
+        try:
+            from tw_screener import SECTOR
+            active_buy = {r["symbol"] + ".TW"
+                          for r in rows if r["_signal_raw"] in ("STRONG BUY", "BUY")}
+            warns = []
+            for sector, syms in SECTOR.items():
+                hits = [s for s in syms if s in active_buy]
+                if len(hits) >= 2:
+                    codes = " + ".join(h.split(".")[0] for h in hits)
+                    warns.append(f"⚠️ {sector}集中（{codes}）")
+            self.lbl_sector_warn.configure(text="  ".join(warns) if warns else "")
+        except Exception:
+            pass
+
 
     # ════════════════════════════════════════════════════════════════════
     # 跟單回測 Tab
@@ -1637,6 +1696,12 @@ class TwStrategyApp(ctk.CTk):
                       fg_color="#1a3040", hover_color="#2a4a60",
                       text_color="#74b9ff",
                       command=lambda: self._sbt_chart_popup(sym, name, result),
+                      ).pack(side="right", padx=4)
+        ctk.CTkButton(hdr, text="🔬 Walk-Forward",
+                      font=(self.ui_font, 10), width=110, height=24,
+                      fg_color="#1a2a10", hover_color="#2a4a20",
+                      text_color="#a8e6cf",
+                      command=lambda: self._sbt_walkforward_popup(sym, name, result),
                       ).pack(side="right", padx=4)
 
         # ── 信號統計 + 回測設定 ───────────────────────────────────────
@@ -1962,12 +2027,30 @@ class TwStrategyApp(ctk.CTk):
                            f"信號策略因訊號過保守或頻繁錯過強勢段，不建議主動操作。"
                            f" 直接持有為最優解；Calmar {bcal:.2f} 僅供參考。")
 
+            # ── 未來改善空間 ─────────────────────────────────────────────
+            tips = []
+            if gap >= 8:
+                tips.append("Walk-Forward 驗證：用前段訓練、後段驗證，確認策略失效或只是參數需要再調整")
+            if abs(bm_mdd) >= 25:
+                tips.append(f"追蹤止盈（Trailing Stop 15%）：MDD {bm_mdd:.1f}% 偏高，可提前鎖定回撤期利潤")
+            if bcal < 0.2 and gap < 10:
+                tips.append("動態倉位（Dynamic Sizing）：Calmar 偏低，回撤擴大時縮小投入可改善風險報酬比")
+            if gap >= 5 and gap < 8:
+                tips.append("嘗試放寬 AVWAP 乘數（b1/b2）或 RSI 閾值，信號過嚴可能錯過太多進場機會")
+            if not tips:
+                tips.append("目前各指標表現均衡。建議定期執行 Walk-Forward 驗證，確認策略在新市場環境持續有效")
+
             r3 = ctk.CTkFrame(conc, fg_color="#0d1525", corner_radius=4)
             r3.pack(fill="x", padx=10, pady=(4, 10))
             ctk.CTkLabel(r3, text=f"💡 {verdict}",
                          font=(self.ui_font, 10), text_color=C_WHITE,
                          wraplength=840, justify="left"
-                         ).pack(anchor="w", padx=12, pady=7)
+                         ).pack(anchor="w", padx=12, pady=(7, 2))
+            ctk.CTkLabel(r3,
+                         text="🔧 改善空間：" + "　|　".join(tips),
+                         font=(self.ui_font, 10), text_color="#a0b8d0",
+                         wraplength=840, justify="left"
+                         ).pack(anchor="w", padx=12, pady=(2, 7))
 
     # ════════════════════════════════════════════════════════════════════
     # 跟單回測 資產曲線圖
@@ -2160,6 +2243,107 @@ class TwStrategyApp(ctk.CTk):
                 tk.Label(win, text="需安裝 matplotlib：pip install matplotlib",
                          fg="#f39c12", bg="#0f1a30",
                          font=(self.ui_font, 11)).pack(expand=True)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _sbt_walkforward_popup(self, sym: str, name: str, result: dict):
+        import tkinter as tk
+        win = tk.Toplevel(self)
+        win.title(f"{sym.replace('.TW','')} {name}  Walk-Forward 驗證")
+        win.geometry("860x520")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        lbl = tk.Label(win, text="計算中…", fg="#a8e6cf", bg="#0f1a30",
+                       font=(self.ui_font, 12))
+        lbl.pack(expand=True)
+
+        start = result.get("start_date", START_DATE)
+        end   = result.get("end_date",   END_DATE)
+        split_yr = int(start[:4]) + (int(end[:4]) - int(start[:4])) // 2
+
+        def _bg():
+            try:
+                from tw_backtest_signals import run_walk_forward
+                wf = run_walk_forward(sym, name,
+                                      annual_budget=result.get("params", {}).get("annual_budget", 100_000),
+                                      start_date=start, end_date=end, split_year=split_yr)
+                self.after(0, lambda: _draw(wf))
+            except Exception as e:
+                self.after(0, lambda: lbl.configure(text=f"錯誤：{e}", fg="#e74c3c"))
+
+        def _draw(wf):
+            if "error" in wf:
+                lbl.configure(text=f"⚠ {wf['error']}", fg="#e74c3c")
+                return
+            lbl.destroy()
+            from tkinter import ttk as _ttk
+
+            # 標題
+            tk.Label(win, text=f"{sym.replace('.TW','')} {name}   "
+                               f"切分點：{wf['split_year']}年  "
+                               f"（訓練 {start[:4]}–{wf['split_year']-1}  /  驗證 {wf['split_year']}–{end[:4]}）",
+                     fg="#74b9ff", bg="#0f1a30",
+                     font=(self.ui_font, 11, "bold")).pack(padx=10, pady=(8, 2), anchor="w")
+            tk.Label(win,
+                     text=f"B&H 訓練期 CAGR {wf['bnh_in_cagr']:+.1f}%   │   "
+                          f"B&H 驗證期 CAGR {wf['bnh_out_cagr']:+.1f}%   "
+                          f"（B&H 自身波動：{wf['bnh_out_cagr']-wf['bnh_in_cagr']:+.1f}%）",
+                     fg="#fdcb6e", bg="#0f1a30",
+                     font=("Consolas", 10)).pack(padx=10, pady=(0, 6), anchor="w")
+
+            sty = _ttk.Style(win)
+            sty.theme_use("clam")
+            sty.configure("WF.Treeview", background="#0d1b2a", foreground="#ecf0f1",
+                          fieldbackground="#0d1b2a", rowheight=24, font=("Consolas", 10))
+            sty.configure("WF.Treeview.Heading", background="#0a0f1a",
+                          foreground="#74b9ff", font=(self.ui_font, 10, "bold"))
+            sty.map("WF.Treeview", background=[("selected", "#1c4f82")])
+
+            cols   = ("策略", "訓練CAGR", "訓練Calmar", "訓練MDD", "訓練筆",
+                             "驗證CAGR", "驗證Calmar", "驗證MDD", "驗證筆", "CAGR變化")
+            widths = (155, 75, 75, 70, 55, 75, 75, 70, 55, 80)
+
+            wrap = tk.Frame(win, bg="#0f1a30")
+            wrap.pack(fill="both", expand=True, padx=10, pady=4)
+            tree = _ttk.Treeview(wrap, style="WF.Treeview",
+                                 columns=cols, show="headings", selectmode="browse")
+            for c, w in zip(cols, widths):
+                tree.heading(c, text=c)
+                tree.column(c, width=w, anchor="center")
+            vsb = _ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=vsb.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            vsb.grid(row=0, column=1, sticky="ns")
+            wrap.grid_rowconfigure(0, weight=1)
+            wrap.grid_columnconfigure(0, weight=1)
+
+            tree.tag_configure("stable",   foreground="#2ecc71")
+            tree.tag_configure("degrade",  foreground="#e74c3c")
+            tree.tag_configure("mild",     foreground="#f39c12")
+
+            for m in wf["modes"]:
+                ins = m["in_sample"]
+                out = m["out_sample"]
+                delta = m["cagr_delta"]
+                tag = "stable" if delta >= -1 else ("mild" if delta >= -4 else "degrade")
+                tree.insert("", "end", tags=(tag,), values=(
+                    m["label"],
+                    f"{ins['cagr']:+.1f}%",
+                    f"{ins['calmar']:.2f}",
+                    f"{ins['mdd']:.1f}%",
+                    str(ins["n_trades"]),
+                    f"{out['cagr']:+.1f}%",
+                    f"{out['calmar']:.2f}",
+                    f"{out['mdd']:.1f}%",
+                    str(out["n_trades"]),
+                    f"{delta:+.1f}%",
+                ))
+
+            # 說明
+            tk.Label(win, text="🟢 穩定（CAGR 差 < 1%）   🟡 輕微退化（1–4%）   🔴 明顯退化（> 4%）",
+                     fg="#95a5a6", bg="#0f1a30", font=("Consolas", 9)
+                     ).pack(side="bottom", pady=6)
 
         threading.Thread(target=_bg, daemon=True).start()
 

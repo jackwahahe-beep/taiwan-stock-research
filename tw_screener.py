@@ -49,6 +49,13 @@ SIGNAL_CONFIG = {
 }
 _DEFAULT_CFG = {"rsi_buy": 45, "rsi_sbuy": 35, "rsi_sell": 70, "b1": 0.97, "b2": 0.92, "s": 1.12}
 
+# 板塊分類（用於相關性集中警告）：同板塊 ≥2 檔同時出現 BUY/STRONG BUY → UI 顯示警告
+SECTOR = {
+    "半導體":   ["2330.TW", "2454.TW", "2303.TW", "3711.TW"],  # 台積電/聯發科/聯電/日月光
+    "AI供應鏈": ["2382.TW", "2308.TW"],                         # 廣達/台達電
+    "高息ETF":  ["00878.TW", "00713.TW", "00929.TW", "00919.TW"],  # 四檔高息 ETF
+}
+
 # 市場模式乘數：風險期只推 STRONG BUY，警戒期忽略普通 BUY
 MARKET_MULTIPLIER = {"NORMAL": 1.0, "WARN": 0.7, "RISK": 0.4}
 

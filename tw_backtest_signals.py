@@ -34,6 +34,9 @@ MODES = [
 # C：ETF 不觸發 SELL（高息ETF 幾乎不會達到 SELL 閾值，且長期持有更佳）
 ETF_SYMBOLS = {"0050.TW", "00878.TW", "00713.TW", "00929.TW", "00919.TW", "006208.TW"}
 
+COMMISSION_RATE = 0.001425   # 券商手續費 0.1425%（買賣均收）
+TAX_RATE        = 0.003      # 台灣證券交易稅 0.3%（僅賣出方）
+
 
 # ── 資料拉取 ──────────────────────────────────────────────────────────────
 
@@ -123,40 +126,39 @@ def _daily_signals(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 def _simulate(sig: pd.DataFrame,
               buy_en: bool, sbuy_en: bool, trim_en: bool,
               annual_budget: float = ANNUAL_BUDGET,
-              symbol: str = "") -> tuple[list[dict], float]:
+              symbol: str = "") -> tuple[list[dict], float, float]:
     """
-    每年年初注入 annual_budget，信號觸發時動用現金買入。
-    A：若全年未部署，年末強制部署全部現金（FALLBACK）。
-    B：TRIM 門檻提升至 30%。
-    C：ETF 不觸發 SELL。
-    D：STRONG BUY 部署全部積累現金（深度回調 = 最大配置機會）。
-    回傳 (trades, total_injected)。
+    年度注資 + 信號跟單模擬，含手續費/交易稅與 MDD 追蹤。
+    A：全年未部署 → 年末強制部署全部現金（FALLBACK）。
+    B：TRIM 門檻 30%（淨獲利）。
+    C：ETF 跳過 SELL。
+    D：STRONG BUY 部署全部積累現金。
+    費用：買進 COMMISSION_RATE；賣出 COMMISSION_RATE + TAX_RATE。
+    回傳 (trades, total_injected, max_drawdown_pct)。
     """
     LOT_BUY  = annual_budget
-    LOT_SBUY = annual_budget * SBUY_MULT
+    is_etf   = symbol in ETF_SYMBOLS
 
-    # C: ETF 判斷
-    is_etf = symbol in ETF_SYMBOLS
-
-    # A: 預先計算每年最後一個交易日
     year_last_days: dict = {}
     for _dt in sig.index:
-        year_last_days[_dt.year] = _dt   # 升序排列，最後覆蓋 = 最後一天
+        year_last_days[_dt.year] = _dt
 
-    cash:               float       = 0.0
-    total_injected:     float       = 0.0
-    inject_count:       int         = 0
-    open_lots:          list[dict]  = []
-    trades:             list[dict]  = []
-    prev_sig            = "HOLD"
-    current_year        = None
-    deployed_this_year  = False   # A: 本年是否已買入
+    cash:              float      = 0.0
+    total_injected:    float      = 0.0
+    inject_count:      int        = 0
+    open_lots:         list[dict] = []
+    trades:            list[dict] = []
+    prev_sig           = "HOLD"
+    current_year       = None
+    deployed_this_year = False
+    peak_equity:       float      = 0.0
+    max_dd_pct:        float      = 0.0
 
     for dt, row in sig.iterrows():
         yr = dt.year
         if yr != current_year:
-            current_year        = yr
-            deployed_this_year  = False   # A: 新年重置
+            current_year       = yr
+            deployed_this_year = False
             if inject_count < MAX_INJECT_YEARS:
                 cash           += annual_budget
                 total_injected += annual_budget
@@ -170,89 +172,101 @@ def _simulate(sig: pd.DataFrame,
         date_str = dt.date().isoformat()
         vs_avwap = round((price / avwap - 1) * 100, 1) if avwap > 0 else None
 
-        # 1. TRIM：每日檢查各持倉，獲利達門檻即出清並回收現金（B：門檻 30%）
+        # ── 工具函式：計算賣出淨回收 ──────────────────────────────────
+        def _sell_net(lot, exit_price):
+            gross    = lot["shares"] * exit_price
+            s_fee    = round(gross * (COMMISSION_RATE + TAX_RATE), 0)
+            net      = gross - s_fee
+            pnl      = net - lot["cost"]
+            all_fees = s_fee + lot.get("buy_fee", 0)
+            return net, pnl, all_fees
+
+        # 1. TRIM：淨獲利達門檻即出清（B：門檻 30%）
         if trim_en and open_lots:
             keep = []
             for lot in open_lots:
-                profit = (price - lot["entry_price"]) / lot["entry_price"] * 100
-                if profit >= TRIM_PROFIT:
-                    proceeds = lot["shares"] * price
-                    pnl      = proceeds - lot["cost"]
-                    hd       = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
+                net_hyp, pnl_hyp, _ = _sell_net(lot, price)
+                profit_pct = pnl_hyp / lot["cost"] * 100
+                if profit_pct >= TRIM_PROFIT:
+                    net, pnl, all_fees = _sell_net(lot, price)
+                    hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
                     trades.append({**lot,
                                    "exit_date": date_str, "exit_price": round(price, 2),
-                                   "proceeds": round(proceeds, 0), "pnl": round(pnl, 0),
+                                   "proceeds": round(net, 0), "pnl": round(pnl, 0),
                                    "pnl_pct": round(pnl / lot["cost"] * 100, 2),
                                    "hold_days": hd, "exit_signal": "TRIM",
+                                   "fees": round(all_fees, 0),
                                    "exit_cond": {"RSI": round(rsi, 1), "vs_AVWAP%": vs_avwap}})
-                    cash += proceeds
+                    cash += net
                 else:
                     keep.append(lot)
             open_lots = keep
 
         just_sold = False
 
-        # 2. SELL：關閉所有持倉，現金回收（C：ETF 跳過）
+        # 2. SELL：關閉所有持倉（C：ETF 跳過）
         if curr_sig == "SELL" and open_lots and not is_etf:
             ec = {"RSI": round(rsi, 1), "vs_AVWAP%": vs_avwap}
             for lot in open_lots:
-                proceeds = lot["shares"] * price
-                pnl      = proceeds - lot["cost"]
-                hd       = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
+                net, pnl, all_fees = _sell_net(lot, price)
+                hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
                 trades.append({**lot,
                                "exit_date": date_str, "exit_price": round(price, 2),
-                               "proceeds": round(proceeds, 0), "pnl": round(pnl, 0),
+                               "proceeds": round(net, 0), "pnl": round(pnl, 0),
                                "pnl_pct": round(pnl / lot["cost"] * 100, 2),
                                "hold_days": hd, "exit_signal": "SELL",
+                               "fees": round(all_fees, 0),
                                "exit_cond": ec})
-                cash += proceeds
+                cash += net
             open_lots = []
             just_sold = True
 
+        # ── 工具函式：執行買進（含手續費）─────────────────────────────
+        def _buy_lot(signal_name, max_spend):
+            nonlocal cash
+            shares = int(max_spend // (price * (1 + COMMISSION_RATE)))
+            if shares <= 0:
+                return False
+            gross   = shares * price
+            b_fee   = round(gross * COMMISSION_RATE, 0)
+            cost    = gross + b_fee
+            cash   -= cost
+            open_lots.append({
+                "entry_date": date_str, "entry_price": round(price, 2),
+                "shares": shares, "cost": round(cost, 0), "entry_signal": signal_name,
+                "buy_fee": b_fee,
+                "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
+                               "vs_AVWAP%": vs_avwap},
+            })
+            return True
+
         # 3. BUY 進場（edge-triggered）
-        elif curr_sig == "BUY" and buy_en and prev_sig != "BUY" and cash >= LOT_BUY * 0.3:
-            spend  = min(cash, LOT_BUY)
-            shares = int(spend // price)
-            if shares > 0:
-                cost  = round(shares * price, 0)
-                cash -= cost
-                open_lots.append({
-                    "entry_date": date_str, "entry_price": round(price, 2),
-                    "shares": shares, "cost": cost, "entry_signal": "BUY",
-                    "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
-                                   "vs_AVWAP%": vs_avwap},
-                })
-                deployed_this_year = True   # A
-
-        # 4. STRONG BUY 進場（edge-triggered，D：部署全部積累現金）
-        elif curr_sig == "STRONG BUY" and sbuy_en and prev_sig != "STRONG BUY" and cash >= LOT_BUY * 0.3:
-            spend  = cash   # D: 深度回調 → 全力出擊
-            shares = int(spend // price)
-            if shares > 0:
-                cost  = round(shares * price, 0)
-                cash -= cost
-                open_lots.append({
-                    "entry_date": date_str, "entry_price": round(price, 2),
-                    "shares": shares, "cost": cost, "entry_signal": "STRONG BUY",
-                    "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
-                                   "vs_AVWAP%": vs_avwap},
-                })
-                deployed_this_year = True   # A
-
-        # A: 年末強制部署（若本年完全未買入）
-        if dt == year_last_days.get(yr) and not deployed_this_year and not just_sold and cash >= LOT_BUY * 0.3:
-            spend  = cash
-            shares = int(spend // price)
-            if shares > 0:
-                cost  = round(shares * price, 0)
-                cash -= cost
-                open_lots.append({
-                    "entry_date": date_str, "entry_price": round(price, 2),
-                    "shares": shares, "cost": cost, "entry_signal": "FALLBACK",
-                    "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
-                                   "vs_AVWAP%": vs_avwap},
-                })
+        if (not just_sold and curr_sig == "BUY" and buy_en
+                and prev_sig != "BUY" and cash >= LOT_BUY * 0.3):
+            if _buy_lot("BUY", min(cash, LOT_BUY)):
                 deployed_this_year = True
+
+        # 4. STRONG BUY 進場（edge-triggered，D：全倉出擊）
+        elif (not just_sold and curr_sig == "STRONG BUY" and sbuy_en
+              and prev_sig != "STRONG BUY" and cash >= LOT_BUY * 0.3):
+            if _buy_lot("STRONG BUY", cash):
+                deployed_this_year = True
+
+        # A: 年末強制部署
+        if (dt == year_last_days.get(yr) and not deployed_this_year
+                and not just_sold and cash >= LOT_BUY * 0.3):
+            if _buy_lot("FALLBACK", cash):
+                deployed_this_year = True
+
+        # MDD 追蹤
+        open_value = sum(l["shares"] * price for l in open_lots)
+        equity     = cash + open_value
+        if equity > peak_equity:
+            peak_equity = equity
+        if peak_equity > 0:
+            cur_dd = (equity - peak_equity) / peak_equity * 100
+            if cur_dd < max_dd_pct:
+                max_dd_pct = cur_dd
 
         prev_sig = curr_sig
 
@@ -265,32 +279,30 @@ def _simulate(sig: pd.DataFrame,
         ec   = {"RSI": round(float(last["rsi"]), 1),
                 "vs_AVWAP%": round((lp / la - 1) * 100, 1) if la > 0 else None}
         for lot in open_lots:
-            proceeds = lot["shares"] * lp
-            pnl      = proceeds - lot["cost"]
-            hd       = (sig.index[-1].date() - _date.fromisoformat(lot["entry_date"])).days
+            net, pnl, all_fees = _sell_net(lot, lp)
+            hd = (sig.index[-1].date() - _date.fromisoformat(lot["entry_date"])).days
             trades.append({**lot,
                            "exit_date": ld, "exit_price": round(lp, 2),
-                           "proceeds": round(proceeds, 0), "pnl": round(pnl, 0),
+                           "proceeds": round(net, 0), "pnl": round(pnl, 0),
                            "pnl_pct": round(pnl / lot["cost"] * 100, 2),
                            "hold_days": hd, "exit_signal": "PERIOD_END",
+                           "fees": round(all_fees, 0),
                            "exit_cond": ec})
-    return trades, total_injected
+    return trades, total_injected, max_dd_pct
 
 
 # ── 統計摘要 ──────────────────────────────────────────────────────────────
 
 def _stats(trades: list[dict], bnh_ret: float = 0.0,
-           total_injected: float = 0.0, years: float = 10.0) -> dict:
-    """
-    total_injected: 全期累計注資金額（return_pct 基準）
-    years:          回測年數（用於 CAGR 計算）
-    """
+           total_injected: float = 0.0, years: float = 10.0,
+           mdd_pct: float = 0.0) -> dict:
     if not trades:
         return {"n_trades": 0, "n_wins": 0, "win_rate": 0.0,
                 "total_invested": 0, "total_injected": round(total_injected, 0),
                 "total_pnl": 0, "return_pct": 0.0, "cagr_pct": 0.0,
                 "avg_hold_days": 0, "best_pct": 0.0, "worst_pct": 0.0,
-                "beats_bnh": False, "n_open_end": 0}
+                "beats_bnh": False, "n_open_end": 0,
+                "mdd_pct": round(mdd_pct, 1), "total_fees": 0}
     deployed = sum(t["cost"] for t in trades)
     pnl      = sum(t["pnl"]  for t in trades)
     n_win    = sum(1 for t in trades if t["pnl"] > 0)
@@ -312,6 +324,8 @@ def _stats(trades: list[dict], bnh_ret: float = 0.0,
         "worst_pct":      round(min(t["pnl_pct"] for t in trades), 2),
         "beats_bnh":      ret > bnh_ret,
         "n_open_end":     sum(1 for t in trades if t["exit_signal"] == "PERIOD_END"),
+        "mdd_pct":        round(mdd_pct, 1),
+        "total_fees":     round(sum(t.get("fees", 0) for t in trades), 0),
     }
 
 
@@ -331,9 +345,9 @@ def run_signal_backtest(symbol: str, name: str,
 
     years = max(1.0, (sig.index[-1] - sig.index[0]).days / 365.25)
 
-    # ── B&H 基準：年度注資版（每年第一交易日買入 annual_budget）──────────
+    # ── B&H 基準：年度注資版（每年第一交易日買入，含手續費）──────────
     bnh_shares = 0.0
-    bnh_cost   = 0.0
+    bnh_cost   = 0.0   # 含買進手續費
     bnh_injected = 0.0
     bnh_txs: list[dict] = []
     bnh_inject_count = 0
@@ -343,24 +357,28 @@ def run_signal_backtest(symbol: str, name: str,
         yr_data = sig[sig.index.year == yr]
         if yr_data.empty:
             continue
-        bnh_injected += annual_budget
+        bnh_injected     += annual_budget
         bnh_inject_count += 1
-        ep    = float(yr_data["close"].iloc[0])
-        bought = int(annual_budget // ep)
+        ep     = float(yr_data["close"].iloc[0])
+        bought = int(annual_budget // (ep * (1 + COMMISSION_RATE)))
         if bought > 0:
-            cost = bought * ep
+            gross   = bought * ep
+            b_fee   = round(gross * COMMISSION_RATE, 0)
+            cost    = gross + b_fee
             bnh_shares += bought
             bnh_cost   += cost
             bnh_txs.append({"date": yr_data.index[0].date().isoformat(),
                              "price": round(ep, 2), "shares": bought,
-                             "cost": round(cost, 0)})
+                             "cost": round(cost, 0), "buy_fee": round(b_fee, 0)})
 
-    xp      = float(sig["close"].iloc[-1])
-    bnh_val = bnh_shares * xp
-    bnh_pnl = bnh_val - bnh_cost
-    bnh_ret = round(bnh_pnl / bnh_injected * 100, 2) if bnh_injected > 0 else 0.0
-    bnh_fv  = bnh_injected + bnh_pnl
-    bnh_cagr = round(((bnh_fv / bnh_injected) ** (1 / years) - 1) * 100, 1) if bnh_injected > 0 else 0.0
+    xp           = float(sig["close"].iloc[-1])
+    bnh_gross    = bnh_shares * xp
+    bnh_sell_fee = round(bnh_gross * (COMMISSION_RATE + TAX_RATE), 0)
+    bnh_net_val  = bnh_gross - bnh_sell_fee
+    bnh_pnl      = bnh_net_val - bnh_cost
+    bnh_ret      = round(bnh_pnl / bnh_injected * 100, 2) if bnh_injected > 0 else 0.0
+    bnh_fv       = bnh_injected + bnh_pnl
+    bnh_cagr     = round(((bnh_fv / bnh_injected) ** (1 / years) - 1) * 100, 1) if bnh_injected > 0 else 0.0
     bnh = {
         "start_date":    sig.index[0].date().isoformat(),
         "end_date":      sig.index[-1].date().isoformat(),
@@ -368,7 +386,7 @@ def run_signal_backtest(symbol: str, name: str,
         "total_injected": round(bnh_injected, 0),
         "shares":        bnh_shares,
         "cost":          round(bnh_cost, 0),
-        "final_value":   round(bnh_val, 0),
+        "final_value":   round(bnh_net_val, 0),
         "pnl":           round(bnh_pnl, 0),
         "return_pct":    bnh_ret,
         "cagr_pct":      bnh_cagr,
@@ -382,12 +400,13 @@ def run_signal_backtest(symbol: str, name: str,
 
     modes_out = []
     for mode_id, label, buy_en, sbuy_en, trim_en in MODES:
-        trades, injected = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget, symbol=symbol)
-        st = _stats(trades, bnh_ret, total_injected=injected, years=years)
+        trades, injected, mdd = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget, symbol=symbol)
+        st = _stats(trades, bnh_ret, total_injected=injected, years=years, mdd_pct=mdd)
         flag = "[+]" if st["beats_bnh"] else "[-]"
-        print(f"    {flag} {label:<18}  {st['n_trades']:>2}筆  "
-              f"報酬{st['return_pct']:+6.1f}%  CAGR{st['cagr_pct']:+5.1f}%  "
-              f"勝率{st['win_rate']:5.1f}%  損益 NT${st['total_pnl']:+10,.0f}")
+        print(f"    {flag} {label:<20}  {st['n_trades']:>2}trade  "
+              f"ret{st['return_pct']:+6.1f}%  CAGR{st['cagr_pct']:+5.1f}%  "
+              f"MDD{st['mdd_pct']:+5.1f}%  "
+              f"fee NT${st['total_fees']:>8,.0f}  pnl NT${st['total_pnl']:+10,.0f}")
         modes_out.append({
             "mode": mode_id, "label": label,
             "stats": st, "trades": trades,
@@ -402,9 +421,11 @@ def run_signal_backtest(symbol: str, name: str,
         "sig_counts":    sc,
         "modes":         modes_out,
         "params": {
-            "annual_budget": annual_budget,
-            "sbuy_mult":     SBUY_MULT,
-            "trim_pct":      TRIM_PROFIT,
+            "annual_budget":   annual_budget,
+            "sbuy_mult":       SBUY_MULT,
+            "trim_pct":        TRIM_PROFIT,
+            "commission_rate": round(COMMISSION_RATE * 100, 4),
+            "tax_rate":        round(TAX_RATE * 100, 2),
         },
     }
 
@@ -414,10 +435,11 @@ def run_signal_backtest_all(annual_budget: float = ANNUAL_BUDGET) -> list[dict]:
     cfg    = load_config()
     stocks = cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
 
-    print(f"\n{'='*55}")
+    print(f"\n{'='*60}")
     print(f"信號跟單回測  {START_DATE} -> {END_DATE}")
-    print(f"每年注資={annual_budget//10000:.0f}萬  SBUY={SBUY_MULT}x  TRIM={TRIM_PROFIT:.0f}%")
-    print(f"{'='*55}\n")
+    print(f"每年注資={annual_budget//10000:.0f}萬  SBUY={SBUY_MULT}x  TRIM={TRIM_PROFIT:.0f}%"
+          f"  手續費={COMMISSION_RATE*100:.4f}%  交易稅={TAX_RATE*100:.1f}%")
+    print(f"{'='*60}\n")
 
     results = []
     for s in stocks:

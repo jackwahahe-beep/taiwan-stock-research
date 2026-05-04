@@ -1543,9 +1543,9 @@ class TwStrategyApp(ctk.CTk):
             (f"STRONG BUY ×{sc.get('STRONG BUY',0)}", C_STRONG),
             (f"  BUY ×{sc.get('BUY',0)}", C_GREEN),
             (f"  SELL ×{sc.get('SELL',0)}", C_RED),
-            (f"   │  每年注資 NT${ab:,.0f}  "
-             f"SBUY={p.get('sbuy_mult',1.5):.1f}x  "
-             f"TRIM≥{p.get('trim_pct',15):.0f}%", C_GRAY),
+            (f"   │  每年注資 NT${ab:,.0f}  SBUY={p.get('sbuy_mult',1.5):.1f}x  "
+             f"TRIM≥{p.get('trim_pct',15):.0f}%  "
+             f"手續費{p.get('commission_rate',0.1425):.4f}%+稅{p.get('tax_rate',0.3):.1f}%", C_GRAY),
         ]:
             ctk.CTkLabel(info, text=txt, font=(self.ui_font, 10),
                          text_color=clr).pack(side="left", padx=6, pady=5)
@@ -1560,8 +1560,8 @@ class TwStrategyApp(ctk.CTk):
         tbl = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=8)
         tbl.pack(fill="x", padx=12, pady=(0, 10))
 
-        headers = ["策略", "交易次", "勝率", "總注資", "損益NT$", "報酬%", "CAGR%", "vs B&H"]
-        widths  = [165, 60, 65, 110, 110, 80, 75, 70]
+        headers = ["策略", "交易次", "勝率", "總注資", "損益NT$", "報酬%", "CAGR%", "MDD%", "手續費NT$", "vs B&H"]
+        widths  = [165, 55, 60, 105, 105, 75, 70, 65, 90, 65]
 
         hdr_row = ctk.CTkFrame(tbl, fg_color="#0f1a30")
         hdr_row.pack(fill="x", padx=2, pady=(2, 0))
@@ -1576,14 +1576,16 @@ class TwStrategyApp(ctk.CTk):
         bnh_ret  = bnh.get("return_pct", 0)
         bnh_cagr = bnh.get("cagr_pct", 0)
         for val, w, clr in [
-            ("📌 B&H（年初買入）",                 165, C_YELLOW),
-            (str(len(bnh.get("transactions", []))), 60,  C_GRAY),
-            ("—",                                    65,  C_GRAY),
-            (f"NT${bnh.get('total_injected',0):,.0f}", 110, C_GRAY),
-            (f"NT${bnh.get('pnl',0):+,.0f}",        110, C_GREEN if bnh.get("pnl",0)>=0 else C_RED),
-            (f"{bnh_ret:+.1f}%",                     80, C_GREEN if bnh_ret>=0 else C_RED),
-            (f"{bnh_cagr:+.1f}%",                    75, C_GREEN if bnh_cagr>=0 else C_RED),
-            ("基準",                                  70, C_YELLOW),
+            ("📌 B&H（年初買入）",                  165, C_YELLOW),
+            (str(len(bnh.get("transactions", []))),   55, C_GRAY),
+            ("—",                                      60, C_GRAY),
+            (f"NT${bnh.get('total_injected',0):,.0f}", 105, C_GRAY),
+            (f"NT${bnh.get('pnl',0):+,.0f}",          105, C_GREEN if bnh.get("pnl",0)>=0 else C_RED),
+            (f"{bnh_ret:+.1f}%",                       75, C_GREEN if bnh_ret>=0 else C_RED),
+            (f"{bnh_cagr:+.1f}%",                      70, C_GREEN if bnh_cagr>=0 else C_RED),
+            ("—",                                       65, C_GRAY),
+            ("含費基準",                                 90, C_GRAY),
+            ("基準",                                     65, C_YELLOW),
         ]:
             ctk.CTkLabel(bnh_row, text=val, font=(self.ui_font, 10),
                          text_color=clr, width=w, anchor="center"
@@ -1603,15 +1605,19 @@ class TwStrategyApp(ctk.CTk):
             pclr = C_GREEN if pnl >= 0 else C_RED
             rclr = C_GREEN if ret >= 0 else C_RED
             wclr = C_GREEN if s["win_rate"] >= 60 else (C_YELLOW if s["win_rate"] >= 40 else C_RED)
+            mdd       = s.get("mdd_pct", 0)
+            tot_fees  = s.get("total_fees", 0)
             for val, w, clr in [
                 (f"{tag} {m['label']}",              165, C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_YELLOW)),
-                (str(s["n_trades"]),                  60,  C_GRAY),
-                (f"{s['win_rate']:.0f}%" if s["n_trades"] else "—", 65, wclr),
-                (f"NT${s['total_injected']:,.0f}",   110, C_GRAY),
-                (f"NT${pnl:+,.0f}",                  110, pclr),
-                (f"{ret:+.1f}%",                      80,  rclr),
-                (f"{cagr:+.1f}%",                     75,  C_GREEN if cagr>=0 else C_RED),
-                ("勝" if beat else ("—" if s["n_trades"]==0 else "輸"), 70, C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_RED)),
+                (str(s["n_trades"]),                  55,  C_GRAY),
+                (f"{s['win_rate']:.0f}%" if s["n_trades"] else "—", 60, wclr),
+                (f"NT${s['total_injected']:,.0f}",   105, C_GRAY),
+                (f"NT${pnl:+,.0f}",                  105, pclr),
+                (f"{ret:+.1f}%",                      75,  rclr),
+                (f"{cagr:+.1f}%",                     70,  C_GREEN if cagr>=0 else C_RED),
+                (f"{mdd:.1f}%",                       65,  "#e17055" if mdd < -20 else (C_YELLOW if mdd < -10 else C_GRAY)),
+                (f"NT${tot_fees:,.0f}",               90,  C_GRAY),
+                ("勝" if beat else ("—" if s["n_trades"]==0 else "輸"), 65, C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_RED)),
             ]:
                 ctk.CTkLabel(dr, text=val, font=(self.ui_font, 10),
                              text_color=clr, width=w, anchor="center"
@@ -1648,13 +1654,15 @@ class TwStrategyApp(ctk.CTk):
                 rclr   = C_GREEN if d_ret >= 0 else C_RED
                 for val, w, clr in [
                     (f"{tag_d} {d_lbl}",        165, C_GREEN if beat_d else "#a0a0c0"),
-                    (str(d_ntx),                  60,  C_GRAY),
-                    ("—",                          65,  C_GRAY),
-                    (f"NT${d_inv:,.0f}",          110, C_GRAY),
-                    (f"NT${d_pnl:+,.0f}",         110, pclr),
-                    (f"{d_ret:+.1f}%",             80,  rclr),
-                    (f"{d_cagr:+.1f}%",            75,  C_GREEN if d_cagr>=0 else C_RED),
-                    ("勝" if beat_d else "輸",      70,  C_GREEN if beat_d else C_RED),
+                    (str(d_ntx),                  55, C_GRAY),
+                    ("—",                          60, C_GRAY),
+                    (f"NT${d_inv:,.0f}",          105, C_GRAY),
+                    (f"NT${d_pnl:+,.0f}",         105, pclr),
+                    (f"{d_ret:+.1f}%",             75, rclr),
+                    (f"{d_cagr:+.1f}%",            70, C_GREEN if d_cagr>=0 else C_RED),
+                    ("—",                           65, C_GRAY),
+                    ("—",                           90, C_GRAY),
+                    ("勝" if beat_d else "輸",       65, C_GREEN if beat_d else C_RED),
                 ]:
                     ctk.CTkLabel(dr, text=val, font=(self.ui_font, 10),
                                  text_color=clr, width=w, anchor="center"
@@ -1704,10 +1712,14 @@ class TwStrategyApp(ctk.CTk):
             ret  = s["return_pct"]
             pnl  = s["total_pnl"]
             cagr = s.get("cagr_pct", 0)
+            s_mdd  = s.get("mdd_pct", 0)
+            s_fees = s.get("total_fees", 0)
             for label, val, clr in [
                 ("報酬率",   f"{ret:+.1f}%",              C_GREEN if ret>=0 else C_RED),
                 ("CAGR",    f"{cagr:+.1f}%",              C_GREEN if cagr>=0 else C_RED),
                 ("總損益",   f"NT${pnl:+,.0f}",            C_GREEN if pnl>=0 else C_RED),
+                ("MDD",     f"{s_mdd:.1f}%",              "#e17055" if s_mdd < -20 else (C_YELLOW if s_mdd < -10 else C_GRAY)),
+                ("手續費+稅", f"NT${s_fees:,.0f}",          C_GRAY),
                 ("勝率",     f"{s['win_rate']:.0f}%",      C_GREEN if s['win_rate']>=60 else C_YELLOW),
                 ("交易次",   str(s["n_trades"]),            C_GRAY),
                 ("平均持有", f"{s['avg_hold_days']}天",     C_GRAY),
@@ -1742,17 +1754,19 @@ class TwStrategyApp(ctk.CTk):
                  fg="#888", bg="#0f1a30",
                  font=("Consolas", 11)).pack(side="left")
 
-        n_win   = sum(1 for t in trades if t["pnl"] > 0)
-        tot_pnl = sum(t["pnl"] for t in trades)
-        tot_inv = sum(t["cost"] for t in trades)
-        ret_pct = tot_pnl / tot_inv * 100 if tot_inv > 0 else 0
-        pnl_clr = "#00b894" if tot_pnl >= 0 else "#d63031"
+        n_win     = sum(1 for t in trades if t["pnl"] > 0)
+        tot_pnl   = sum(t["pnl"] for t in trades)
+        tot_inv   = sum(t["cost"] for t in trades)
+        tot_fees  = sum(t.get("fees", 0) for t in trades)
+        ret_pct   = tot_pnl / tot_inv * 100 if tot_inv > 0 else 0
+        pnl_clr   = "#00b894" if tot_pnl >= 0 else "#d63031"
 
         smr = tk.Frame(win, bg="#1a2a40")
         smr.pack(fill="x", padx=10, pady=2)
         for txt, clr in [
             (f"總投入  NT${tot_inv:,.0f}", "#fdcb6e"),
             (f"  總損益  NT${tot_pnl:+,.0f}  ({ret_pct:+.1f}%)", pnl_clr),
+            (f"  手續費+稅  NT${tot_fees:,.0f}", "#b2bec3"),
             (f"  勝率  {n_win}/{len(trades)}  ({n_win/len(trades)*100:.0f}%)"
              if trades else "", "#74b9ff"),
         ]:
@@ -1774,8 +1788,8 @@ class TwStrategyApp(ctk.CTk):
         cols = ("進場日", "進場信號", "DD%", "RSI進", "vs_AVWAP%",
                 "進場價", "股數", "成本NT$",
                 "出場日", "出場信號", "RSI出", "出場價", "回收NT$",
-                "損益NT$", "損益%", "持有天")
-        widths = (95, 95, 60, 55, 75, 70, 60, 90, 95, 80, 55, 70, 90, 90, 65, 65)
+                "手續費+稅", "損益NT$", "損益%", "持有天")
+        widths = (95, 95, 60, 55, 75, 70, 60, 90, 95, 80, 55, 70, 90, 80, 90, 65, 65)
 
         wrap = tk.Frame(win, bg="#0f1a30")
         wrap.pack(fill="both", expand=True, padx=10, pady=6)
@@ -1825,6 +1839,7 @@ class TwStrategyApp(ctk.CTk):
                 f"{xc.get('RSI', '—')}",
                 f"{t.get('exit_price', 0):,.2f}",
                 f"NT${t.get('proceeds', 0):,.0f}",
+                f"NT${t.get('fees', 0):,.0f}",
                 f"NT${pnl:+,.0f}",
                 f"{t.get('pnl_pct', 0):+.2f}%",
                 f"{t.get('hold_days', 0)}",

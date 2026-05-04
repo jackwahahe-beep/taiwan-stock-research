@@ -1413,8 +1413,9 @@ class TwStrategyApp(ctk.CTk):
         # 回測年份選擇（右至左 pack）
         _years_end   = [str(y) for y in range(2015, 2026)]
         _years_start = [str(y) for y in range(2010, 2026)]
-        self._sbt_end_var   = ctk.StringVar(value="2025")
-        self._sbt_start_var = ctk.StringVar(value="2015")
+        self._sbt_end_var    = ctk.StringVar(value="2025")
+        self._sbt_start_var  = ctk.StringVar(value="2015")
+        self._sbt_user_start = "2015"   # 使用者手動設定的開始年份（不被自動調整覆蓋）
         ctk.CTkOptionMenu(bar, variable=self._sbt_end_var, values=_years_end,
                           command=self._sbt_on_date_change,
                           width=68, height=28, font=(self.ui_font, 11)
@@ -1492,7 +1493,8 @@ class TwStrategyApp(ctk.CTk):
         return f"{sym}|{s}|{e}"
 
     def _sbt_on_date_change(self, _=None):
-        """年份選單切換時，依新的 key 更新按鈕顏色。"""
+        """年份選單切換時，更新使用者設定並刷新按鈕顏色。"""
+        self._sbt_user_start = self._sbt_start_var.get()  # 記住手動選擇的開始年
         for sym, btn in self._sbt_btns.items():
             has = self._sbt_ck(sym) in self._sbt_cache
             btn.configure(text_color=C_WHITE if has else C_GRAY)
@@ -1533,6 +1535,14 @@ class TwStrategyApp(ctk.CTk):
                 adjust_msg = (f"ℹ {sym.replace('.TW','')} 最早資料為 {min_yr} 年，"
                               f"開始年份已自動調整為 {new_start}")
                 # 更新按鈕顏色
+                for sym2, btn in self._sbt_btns.items():
+                    btn.configure(text_color=C_WHITE if self._sbt_ck(sym2) in self._sbt_cache else C_GRAY)
+        else:
+            # 無限制的股票：若開始年份是被前一支股票自動調高的，還原使用者原本設定
+            user_start = int(self._sbt_user_start)
+            cur_start  = int(self._sbt_start_var.get())
+            if cur_start != user_start:
+                self._sbt_start_var.set(self._sbt_user_start)
                 for sym2, btn in self._sbt_btns.items():
                     btn.configure(text_color=C_WHITE if self._sbt_ck(sym2) in self._sbt_cache else C_GRAY)
 

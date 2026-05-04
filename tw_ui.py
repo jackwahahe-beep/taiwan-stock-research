@@ -2166,28 +2166,45 @@ class TwStrategyApp(ctk.CTk):
             tk.Label(legend, text=txt, fg=clr, bg="#0f1a30",
                      font=("Consolas", 9)).pack(side="left", padx=4)
 
-        # 逐年損益表
+        # 逐年損益表（含進場統計，讓累積年份不顯空白）
         _yr_frame = tk.Frame(win, bg="#0a1020")
         _yr_frame.pack(fill="x", padx=10, pady=(0, 8))
-        tk.Label(_yr_frame, text="逐年損益  ",
+        tk.Label(_yr_frame, text="逐年 入→出  ",
                  fg="#74b9ff", bg="#0a1020",
                  font=("Consolas", 9, "bold")).pack(side="left")
 
-        # 計算逐年損益
         from collections import defaultdict
-        yr_pnl: dict = defaultdict(float)
-        yr_fee: dict = defaultdict(float)
-        yr_cnt: dict = defaultdict(int)
+        yr_entry:  dict = defaultdict(int)
+        yr_pnl:    dict = defaultdict(float)
+        yr_exit:   dict = defaultdict(int)   # 實際出場（非期末）
+        yr_open:   dict = defaultdict(int)   # 期末未平倉
         for t in trades:
-            yr = t.get("exit_date", "")[:4]
-            if yr:
-                yr_pnl[yr] += t.get("pnl", 0)
-                yr_fee[yr] += t.get("fees", 0)
-                yr_cnt[yr] += 1
-        for yr in sorted(yr_pnl):
-            p   = yr_pnl[yr]
-            clr = "#2ecc71" if p >= 0 else "#e74c3c"
-            txt = f"{yr}: {p:+,.0f}({yr_cnt[yr]}筆)  "
+            ey = t.get("entry_date", "")[:4]
+            xy = t.get("exit_date",  "")[:4]
+            if ey:
+                yr_entry[ey] += 1
+            if xy:
+                if t.get("exit_signal") == "PERIOD_END":
+                    yr_open[xy] += 1
+                else:
+                    yr_pnl[xy]  += t.get("pnl", 0)
+                    yr_exit[xy] += 1
+
+        all_yrs = sorted(set(yr_entry) | set(yr_exit) | set(yr_open))
+        for yr in all_yrs:
+            en = yr_entry.get(yr, 0)
+            ex = yr_exit.get(yr, 0)
+            op = yr_open.get(yr, 0)
+            p  = yr_pnl.get(yr, 0.0)
+
+            if ex or op:
+                clr = "#f39c12" if (op and not ex) else ("#2ecc71" if p >= 0 else "#e74c3c")
+                pnl_str = f" {p:+,.0f}" if ex else ""
+                op_str  = f"(持{op})" if op else ""
+                txt = f"{yr}: 入{en}/出{ex}{op_str}{pnl_str}  "
+            else:
+                clr = "#636e72"
+                txt = f"{yr}: 入{en}持倉  "
             tk.Label(_yr_frame, text=txt, fg=clr, bg="#0a1020",
                      font=("Consolas", 9)).pack(side="left")
 

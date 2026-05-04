@@ -24,10 +24,14 @@ watchlist:
       name: "廣達"               # AI伺服器最大受益者
     - symbol: "2308.TW"
       name: "台達電"             # 電源/散熱，AI需求爆發
+    - symbol: "2912.TW"
+      name: "統一超"             # 7-Eleven，防禦型消費股
     - symbol: "3037.TW"
-      name: "欣興"               # CoWoS ABF載板
+      name: "欣興"               # CoWoS ABF載板（回測用，不推播）
+      backtest_only: true
     - symbol: "2408.TW"
-      name: "南亞科"             # DRAM，HBM題材
+      name: "南亞科"             # DRAM（回測用，不推播）
+      backtest_only: true
 
 # 信號參數
 signals:

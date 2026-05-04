@@ -18,6 +18,10 @@ BASE_DIR  = Path(__file__).parent
 CACHE_DIR = BASE_DIR / "cache"
 TZ        = ZoneInfo("Asia/Taipei")
 
+# 跟單回測預設日期（與 tw_backtest_signals.py 一致）
+START_DATE = "2015-01-01"
+END_DATE   = "2025-12-31"
+
 # ── 顏色常數 ──────────────────────────────────────────────────────────────────
 BG       = "#1a1a2e"
 BG_PANEL = "#16213e"
@@ -1379,7 +1383,7 @@ class TwStrategyApp(ctk.CTk):
         bar = ctk.CTkFrame(tab, fg_color=BG_PANEL, height=46, corner_radius=0)
         bar.pack(fill="x")
         bar.pack_propagate(False)
-        ctk.CTkLabel(bar, text="📋 跟單回測（2015–2025）",
+        ctk.CTkLabel(bar, text="📋 跟單回測",
                      font=(self.ui_font, 13, "bold"), text_color=C_BLUE
                      ).pack(side="left", padx=16, pady=12)
         ctk.CTkLabel(bar, text="模擬每年注資，按 BUY / STRONG BUY / SELL 信號操作，逐筆記錄損益",
@@ -1396,6 +1400,25 @@ class TwStrategyApp(ctk.CTk):
         ctk.CTkEntry(bar, textvariable=self._sbt_budget_var,
                      width=90, height=28, font=(self.ui_font, 11)
                      ).pack(side="right", padx=(0, 4))
+        # 回測年份選擇（右至左 pack）
+        _years_end   = [str(y) for y in range(2015, 2026)]
+        _years_start = [str(y) for y in range(2010, 2026)]
+        self._sbt_end_var   = ctk.StringVar(value="2025")
+        self._sbt_start_var = ctk.StringVar(value="2015")
+        ctk.CTkOptionMenu(bar, variable=self._sbt_end_var, values=_years_end,
+                          command=self._sbt_on_date_change,
+                          width=68, height=28, font=(self.ui_font, 11)
+                          ).pack(side="right", padx=(0, 4))
+        ctk.CTkLabel(bar, text="至",
+                     font=(self.ui_font, 10), text_color=C_GRAY
+                     ).pack(side="right", padx=2)
+        ctk.CTkOptionMenu(bar, variable=self._sbt_start_var, values=_years_start,
+                          command=self._sbt_on_date_change,
+                          width=68, height=28, font=(self.ui_font, 11)
+                          ).pack(side="right", padx=(0, 2))
+        ctk.CTkLabel(bar, text="年份",
+                     font=(self.ui_font, 10), text_color=C_GRAY
+                     ).pack(side="right", padx=(10, 2))
 
         body = ctk.CTkFrame(tab, fg_color=BG, corner_radius=0)
         body.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1419,9 +1442,13 @@ class TwStrategyApp(ctk.CTk):
         self._sbt_detail = ctk.CTkScrollableFrame(right, fg_color=BG)
         self._sbt_detail.pack(fill="both", expand=True)
 
-        # 載入快取、填充股票清單
-        self._sbt_cache: dict = _load_sbt_cache()
-        self._sbt_btns:  dict = {}
+        # 載入快取：key = "SYM|start|end"
+        _file_cache = _load_sbt_cache()  # {sym: result}
+        self._sbt_cache: dict = {
+            f"{sym}|{START_DATE}|{END_DATE}": r
+            for sym, r in _file_cache.items()
+        }
+        self._sbt_btns: dict = {}
 
         try:
             cfg    = _load_config()
@@ -1431,10 +1458,12 @@ class TwStrategyApp(ctk.CTk):
 
         for s in stocks:
             sym, name = s["symbol"], s["name"]
-            has = sym in self._sbt_cache
+            is_bt_only = s.get("backtest_only", False)
+            ck  = f"{sym}|{START_DATE}|{END_DATE}"
+            has = ck in self._sbt_cache
             btn = ctk.CTkButton(
                 self._sbt_list,
-                text=f"{sym.replace('.TW','')}  {name}",
+                text=f"{'[研]' if is_bt_only else ''}{sym.replace('.TW','')}  {name}",
                 font=(self.ui_font, 11),
                 fg_color="transparent", hover_color=BG_ROW_A,
                 text_color=C_WHITE if has else C_GRAY,
@@ -1444,6 +1473,22 @@ class TwStrategyApp(ctk.CTk):
             btn.pack(fill="x", pady=1, padx=2)
             self._sbt_btns[sym] = btn
 
+        self._sbt_hint()
+
+    def _sbt_ck(self, sym: str) -> str:
+        """當前日期設定的 cache key。"""
+        s = f"{self._sbt_start_var.get()}-01-01"
+        e = f"{self._sbt_end_var.get()}-12-31"
+        return f"{sym}|{s}|{e}"
+
+    def _sbt_on_date_change(self, _=None):
+        """年份選單切換時，依新的 key 更新按鈕顏色。"""
+        for sym, btn in self._sbt_btns.items():
+            has = self._sbt_ck(sym) in self._sbt_cache
+            btn.configure(text_color=C_WHITE if has else C_GRAY)
+        # 清空右側面板，避免顯示舊日期範圍的結果
+        for w in self._sbt_detail.winfo_children():
+            w.destroy()
         self._sbt_hint()
 
     def _sbt_hint(self):
@@ -1468,13 +1513,13 @@ class TwStrategyApp(ctk.CTk):
         for w in self._sbt_detail.winfo_children():
             w.destroy()
 
-        result = self._sbt_cache.get(sym)
+        result = self._sbt_cache.get(self._sbt_ck(sym))
+        yr_range = f"{self._sbt_start_var.get()}–{self._sbt_end_var.get()}"
         if result:
             self._sbt_show_result(sym, name, result)
         else:
-            # 顯示「執行回測」按鈕
             ctk.CTkLabel(self._sbt_detail,
-                         text=f"{sym.replace('.TW','')} {name}\n無快取",
+                         text=f"{sym.replace('.TW','')} {name}  [{yr_range}]\n無快取",
                          font=(self.ui_font, 13), text_color=C_YELLOW,
                          justify="center").pack(pady=30)
             ctk.CTkButton(
@@ -1485,7 +1530,12 @@ class TwStrategyApp(ctk.CTk):
             ).pack(pady=10)
 
     def _sbt_run_stock(self, sym: str, name: str):
-        self._sbt_status.configure(text=f"執行中：{sym.replace('.TW','')}…")
+        start_date = f"{self._sbt_start_var.get()}-01-01"
+        end_date   = f"{self._sbt_end_var.get()}-12-31"
+        ck         = self._sbt_ck(sym)
+        yr_range   = f"{self._sbt_start_var.get()}–{self._sbt_end_var.get()}"
+
+        self._sbt_status.configure(text=f"執行中：{sym.replace('.TW','')} [{yr_range}]…")
         for w in self._sbt_detail.winfo_children():
             w.destroy()
         ctk.CTkLabel(self._sbt_detail, text="資料拉取中，請稍候…",
@@ -1501,9 +1551,10 @@ class TwStrategyApp(ctk.CTk):
         def _bg():
             try:
                 from tw_backtest_signals import run_signal_backtest
-                result = run_signal_backtest(sym, name, annual_budget=annual_budget)
+                result = run_signal_backtest(sym, name, annual_budget=annual_budget,
+                                             start_date=start_date, end_date=end_date)
                 if "error" not in result:
-                    self._sbt_cache[sym] = result
+                    self._sbt_cache[ck] = result
                     if sym in self._sbt_btns:
                         self.after(0, lambda: self._sbt_btns[sym].configure(text_color=C_WHITE))
                     self.after(0, lambda: self._sbt_show_result(sym, name, result))

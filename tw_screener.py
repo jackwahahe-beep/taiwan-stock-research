@@ -309,7 +309,8 @@ def run_scan() -> list[dict]:
     print(f"\n市場模式：{mode_label}（大盤 {market_detail.get('twii_vs_ma200_pct', 'N/A')}% vs MA200，波動率 {market_detail.get('vol_20_annualized', 'N/A')}%）")
 
     results     = []
-    all_stocks  = cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
+    all_stocks  = [s for s in cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
+                   if not s.get("backtest_only", False)]
 
     for stock in all_stocks:
         symbol = stock["symbol"]

@@ -40,9 +40,9 @@ TAX_RATE        = 0.003      # 台灣證券交易稅 0.3%（僅賣出方）
 
 # ── 資料拉取 ──────────────────────────────────────────────────────────────
 
-def _fetch(symbol: str) -> pd.DataFrame:
+def _fetch(symbol: str, start: str = START_DATE, end: str = END_DATE) -> pd.DataFrame:
     df = yf.Ticker(symbol).history(
-        start=START_DATE, end=END_DATE, auto_adjust=True)
+        start=start, end=end, auto_adjust=True)
     if df.empty:
         return df
     df.index = (df.index.tz_localize(TZ)
@@ -126,7 +126,8 @@ def _daily_signals(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 def _simulate(sig: pd.DataFrame,
               buy_en: bool, sbuy_en: bool, trim_en: bool,
               annual_budget: float = ANNUAL_BUDGET,
-              symbol: str = "") -> tuple[list[dict], float, float]:
+              symbol: str = "",
+              max_inject_years: int = MAX_INJECT_YEARS) -> tuple[list[dict], float, float]:
     """
     年度注資 + 信號跟單模擬，含手續費/交易稅與 MDD 追蹤。
     A：全年未部署 → 年末強制部署全部現金（FALLBACK）。
@@ -159,7 +160,7 @@ def _simulate(sig: pd.DataFrame,
         if yr != current_year:
             current_year       = yr
             deployed_this_year = False
-            if inject_count < MAX_INJECT_YEARS:
+            if inject_count < max_inject_years:
                 cash           += annual_budget
                 total_injected += annual_budget
                 inject_count   += 1
@@ -332,9 +333,11 @@ def _stats(trades: list[dict], bnh_ret: float = 0.0,
 # ── 主函式 ────────────────────────────────────────────────────────────────
 
 def run_signal_backtest(symbol: str, name: str,
-                        annual_budget: float = ANNUAL_BUDGET) -> dict:
-    print(f"  信號回測 {symbol} {name}...")
-    df = _fetch(symbol)
+                        annual_budget: float = ANNUAL_BUDGET,
+                        start_date: str = START_DATE,
+                        end_date: str = END_DATE) -> dict:
+    print(f"  信號回測 {symbol} {name}  [{start_date[:4]}–{end_date[:4]}]...")
+    df = _fetch(symbol, start=start_date, end=end_date)
     if df.empty or len(df) < 200:
         print(f"    [!] 資料不足（{len(df) if not df.empty else 0} 天），跳過")
         return {"symbol": symbol, "name": name, "error": "資料不足"}
@@ -344,6 +347,8 @@ def run_signal_backtest(symbol: str, name: str,
         return {"symbol": symbol, "name": name, "error": "指標計算資料不足"}
 
     years = max(1.0, (sig.index[-1] - sig.index[0]).days / 365.25)
+    # 動態注資年數上限（end_year - start_year，避免跨年多計一次）
+    max_inject_yrs = pd.Timestamp(end_date).year - pd.Timestamp(start_date).year
 
     # ── B&H 基準：年度注資版（每年第一交易日買入，含手續費）──────────
     bnh_shares = 0.0
@@ -352,7 +357,7 @@ def run_signal_backtest(symbol: str, name: str,
     bnh_txs: list[dict] = []
     bnh_inject_count = 0
     for yr in range(sig.index[0].year, sig.index[-1].year + 1):
-        if bnh_inject_count >= MAX_INJECT_YEARS:
+        if bnh_inject_count >= max_inject_yrs:
             break
         yr_data = sig[sig.index.year == yr]
         if yr_data.empty:
@@ -400,7 +405,8 @@ def run_signal_backtest(symbol: str, name: str,
 
     modes_out = []
     for mode_id, label, buy_en, sbuy_en, trim_en in MODES:
-        trades, injected, mdd = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget, symbol=symbol)
+        trades, injected, mdd = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget,
+                                          symbol=symbol, max_inject_years=max_inject_yrs)
         st = _stats(trades, bnh_ret, total_injected=injected, years=years, mdd_pct=mdd)
         flag = "[+]" if st["beats_bnh"] else "[-]"
         print(f"    {flag} {label:<20}  {st['n_trades']:>2}trade  "
@@ -430,20 +436,23 @@ def run_signal_backtest(symbol: str, name: str,
     }
 
 
-def run_signal_backtest_all(annual_budget: float = ANNUAL_BUDGET) -> list[dict]:
+def run_signal_backtest_all(annual_budget: float = ANNUAL_BUDGET,
+                            start_date: str = START_DATE,
+                            end_date: str = END_DATE) -> list[dict]:
     from tw_screener import load_config
     cfg    = load_config()
     stocks = cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
 
     print(f"\n{'='*60}")
-    print(f"信號跟單回測  {START_DATE} -> {END_DATE}")
+    print(f"信號跟單回測  {start_date} -> {end_date}")
     print(f"每年注資={annual_budget//10000:.0f}萬  SBUY={SBUY_MULT}x  TRIM={TRIM_PROFIT:.0f}%"
           f"  手續費={COMMISSION_RATE*100:.4f}%  交易稅={TAX_RATE*100:.1f}%")
     print(f"{'='*60}\n")
 
     results = []
     for s in stocks:
-        r = run_signal_backtest(s["symbol"], s["name"], annual_budget=annual_budget)
+        r = run_signal_backtest(s["symbol"], s["name"], annual_budget=annual_budget,
+                                start_date=start_date, end_date=end_date)
         results.append(r)
         print()
 

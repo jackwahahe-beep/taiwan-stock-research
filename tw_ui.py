@@ -1767,6 +1767,8 @@ class TwStrategyApp(ctk.CTk):
                 d_inv  = ds.get("total_invested", 0) or 0
                 d_ntx  = ds.get("n_transactions", 0) or 0
                 d_lbl  = ds.get("label", "DCA")
+                d_fp   = ds.get("final_price", 0.0)
+                d_txs  = ds.get("transactions", [])
                 beat_d = d_ret > bnh_ret
                 dr = ctk.CTkFrame(tbl, fg_color="#0a0a1d")
                 dr.pack(fill="x", padx=2, pady=1)
@@ -1783,11 +1785,25 @@ class TwStrategyApp(ctk.CTk):
                     (f"{d_cagr:+.1f}%",            70, C_GREEN if d_cagr>=0 else C_RED),
                     ("—",                           65, C_GRAY),
                     ("—",                           90, C_GRAY),
-                    ("勝" if beat_d else "輸",       65, C_GREEN if beat_d else C_RED),
                 ]:
                     ctk.CTkLabel(dr, text=val, font=(self.ui_font, 10),
                                  text_color=clr, width=w, anchor="center"
                                  ).pack(side="left")
+                # 展開明細按鈕（取代原來的「勝/輸」文字）
+                if d_txs:
+                    ctk.CTkButton(
+                        dr, text="📋 明細",
+                        font=(self.ui_font, 9), width=65, height=20,
+                        fg_color="#1a3040", hover_color="#2a4a60",
+                        text_color="#74b9ff",
+                        command=lambda txs=d_txs, lbl=d_lbl, fp=d_fp: self._dca_popup(
+                            txs, f"{sym.replace('.TW','')} {name}", lbl, final_price=fp),
+                    ).pack(side="left", padx=2)
+                else:
+                    ctk.CTkLabel(dr, text="勝" if beat_d else "輸", width=65,
+                                 font=(self.ui_font, 10),
+                                 text_color=C_GREEN if beat_d else C_RED,
+                                 anchor="center").pack(side="left")
 
         # ── 各策略卡片（含交易明細按鈕）─────────────────────────────
         for m in modes:

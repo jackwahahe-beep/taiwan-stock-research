@@ -37,6 +37,15 @@ C_GRAY   = "#95a5a6"
 C_WHITE  = "#ecf0f1"
 C_BLUE   = "#3498db"
 
+# 各股最早有效資料年份（上市較晚或早期資料稀少的股票）
+# 點擊股票時若選定的開始年早於此值，自動調整
+STOCK_EARLIEST_YEAR = {
+    "00929.TW": 2023,  # 上市 2023-04
+    "00919.TW": 2023,  # 上市 2022-10，但 2022 年資料不足 200 天
+    "00878.TW": 2020,  # 上市 2019-08，2019 年資料僅半年
+    "00713.TW": 2018,  # 上市 2017-12，2017 年資料僅半個月
+}
+
 CATEGORY = {
     "0050.TW":  ("ETF 基準", "B&H"),
     "00878.TW": ("高息 ETF", "BUY"),
@@ -1511,18 +1520,38 @@ class TwStrategyApp(ctk.CTk):
     def _on_sbt_select(self, sym: str, name: str):
         for s, b in self._sbt_btns.items():
             b.configure(fg_color="#1f4e79" if s == sym else "transparent")
+
+        # ── 自動調整年份範圍 ──────────────────────────────────────────────
+        adjust_msg = None
+        min_yr = STOCK_EARLIEST_YEAR.get(sym)
+        if min_yr:
+            cur_start = int(self._sbt_start_var.get())
+            cur_end   = int(self._sbt_end_var.get())
+            if cur_start < min_yr:
+                new_start = min(min_yr, cur_end - 1)
+                self._sbt_start_var.set(str(new_start))
+                adjust_msg = (f"ℹ {sym.replace('.TW','')} 最早資料為 {min_yr} 年，"
+                              f"開始年份已自動調整為 {new_start}")
+                # 更新按鈕顏色
+                for sym2, btn in self._sbt_btns.items():
+                    btn.configure(text_color=C_WHITE if self._sbt_ck(sym2) in self._sbt_cache else C_GRAY)
+
         for w in self._sbt_detail.winfo_children():
             w.destroy()
 
-        result = self._sbt_cache.get(self._sbt_ck(sym))
+        result   = self._sbt_cache.get(self._sbt_ck(sym))
         yr_range = f"{self._sbt_start_var.get()}–{self._sbt_end_var.get()}"
         if result:
             self._sbt_show_result(sym, name, result)
         else:
+            if adjust_msg:
+                ctk.CTkLabel(self._sbt_detail, text=adjust_msg,
+                             font=(self.ui_font, 10), text_color=C_YELLOW,
+                             justify="center").pack(pady=(20, 4))
             ctk.CTkLabel(self._sbt_detail,
                          text=f"{sym.replace('.TW','')} {name}  [{yr_range}]\n無快取",
                          font=(self.ui_font, 13), text_color=C_YELLOW,
-                         justify="center").pack(pady=30)
+                         justify="center").pack(pady=(8, 4))
             ctk.CTkButton(
                 self._sbt_detail, text="▶ 執行此股票回測（約 10–30 秒）",
                 font=(self.ui_font, 12),
@@ -1531,6 +1560,13 @@ class TwStrategyApp(ctk.CTk):
             ).pack(pady=10)
 
     def _sbt_run_stock(self, sym: str, name: str):
+        start_yr = int(self._sbt_start_var.get())
+        end_yr   = int(self._sbt_end_var.get())
+        if start_yr >= end_yr:
+            self._sbt_status.configure(
+                text=f"⚠ 開始年份須小於結束年份（{start_yr} ≥ {end_yr}），請調整範圍",
+                text_color=C_YELLOW)
+            return
         start_date = f"{self._sbt_start_var.get()}-01-01"
         end_date   = f"{self._sbt_end_var.get()}-12-31"
         ck         = self._sbt_ck(sym)

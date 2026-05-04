@@ -1,52 +1,8 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-05-04（Session 12 完成）
+> 上次更新：2026-05-05（Session 11 全部完成）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
-> 最新 commit：見 git log
-
----
-
-## Session 12 — 完成事項
-
-### Block A：Discord 推播加入信號回測策略建議（tw_discord.py）
-- 新增 `_load_sbt_cache()`: 讀取最新 `cache/signal_backtest_*.json`，回傳 dict by symbol
-- 新增 `_sbt_context_line(symbol, sbt_cache)`: 從 `best_mode` 產生一行策略摘要
-  - 若 BNH 最佳 → "持有（B&H）優於信號操作，建議長期持有"
-  - 否則 → "**{label}**  CAGR X%  MDD X%  Calmar X.XX"
-- `build_buy_embed()` / `build_sell_embed()` 各加一個 "📋 信號回測建議策略" embed field
-- `send_scan_results()` 呼叫 `_load_sbt_cache()` 並傳入 sbt_cache 給兩個 builder
-
-### Block B：資產曲線進出場三角標記（tw_ui.py）
-- `_bg()` 找出最佳 Calmar 策略的 rep_trades，傳入 `_draw()`
-- `_draw()` 在 equity subplot 疊加 scatter 標記：
-  - 進場 → 綠色 ▲（marker="^"）
-  - SELL/PERIOD_END 出場 → 紅色 ▼
-  - TRIM/TRAILING_STOP 出場 → 青色 ▼
-- 日期→索引用 `pd.Timestamp(date, tz=_tz_mk)` + `idx.get_loc(ts, method="nearest")`
-
-### Block C：策略卡片出場細分（tw_ui.py）
-- 每張策略卡（`_sbt_show_result()` 內）的指標 row 後加一行出場細分：
-  - 統計 TRIM / TRAILING_STOP / SELL / FALLBACK / PERIOD_END 各出場次數
-  - 格式：`出場細分：止盈 X  ｜  追蹤止盈 X  ｜  SELL信號 X  ｜  ...`
-  - 顏色 `#74a0c0`；零值欄位不顯示
-
-### Block D：trade popup 逐年績效表格（tw_ui.py）
-- `_sbt_trade_popup()` 原「逐年入→出」inline label 改為正式 Treeview 表格
-- 欄位：年度 / 進場數 / 出場數 / 勝場 / 勝率% / 損益NT$ / 期末持倉
-- 色碼：綠=獲利年 / 紅=虧損年 / 橙=僅持倉年 / 灰=無出場
-- 視窗高度從 1280×560 → 1280×680，容納新表格
-
-### 股災應對分析（tw_ui.py）
-- `CRASH_PERIODS`：4 個台股重要股災事件（貿易戰/COVID/升息/日圓套息）
-- `_crash_analysis(trades, cs, ce)`：計算策略在各股災期間的進場、追蹤止盈、SELL 出場次數
-- 策略評析末加「📉 歷次股災應對」逐事件文字分析
-- 建議文字自動反映股災行為；若從未逢低進場，提示放寬 RSI
-
-### 其他 UI 改善
-- 掃描 tab 加 `vs AVWAP %` 欄（負數=低於錨點，買入區域）
-- Walk-Forward popup 加穩定性摘要（✅/🟡/⚠️ X/N 策略穩定）
-- 回撤圖加股災期間色塊標注（CRASH_PERIODS）
-- 策略卡片依 CAGR 降序排列（最優策略置頂）
+> 最新 commit：見 git log（Session 11 共 4 個 commits）
 
 ---
 

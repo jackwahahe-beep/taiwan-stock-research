@@ -1873,6 +1873,102 @@ class TwStrategyApp(ctk.CTk):
                 ctk.CTkLabel(col, text=val,
                              font=(self.ui_font, 11, "bold"), text_color=clr).pack()
 
+        # ── 策略綜合評析（結論欄）──────────────────────────────────────
+        active_modes = [m for m in modes if m["stats"]["n_trades"] > 0]
+        if active_modes:
+            sep2 = ctk.CTkFrame(self._sbt_detail, fg_color="#2a2a4a", height=2, corner_radius=0)
+            sep2.pack(fill="x", padx=12, pady=(14, 6))
+            ctk.CTkLabel(self._sbt_detail, text="📊 策略綜合評析",
+                         font=(self.ui_font, 11, "bold"), text_color=C_BLUE
+                         ).pack(anchor="w", padx=16, pady=(0, 4))
+
+            conc = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=8)
+            conc.pack(fill="x", padx=12, pady=(0, 14))
+
+            best_cagr_m   = max(active_modes, key=lambda m: m["stats"]["cagr_pct"])
+            best_calmar_m = max(active_modes, key=lambda m: m["stats"].get("calmar", 0))
+            best_mdd_m    = max(active_modes, key=lambda m: -m["stats"].get("mdd_pct", -99))
+
+            bc_cagr    = best_cagr_m["stats"]["cagr_pct"]
+            bcal       = best_calmar_m["stats"].get("calmar", 0)
+            bm_mdd     = best_mdd_m["stats"].get("mdd_pct", 0)
+            gap        = bnh_cagr - bc_cagr   # B&H vs best signal
+
+            # ── 三格指標卡 ──────────────────────────────────────────────
+            r1 = ctk.CTkFrame(conc, fg_color="transparent")
+            r1.pack(fill="x", padx=10, pady=(8, 4))
+            cagr_winner_lbl = "B&H" if bnh_cagr >= bc_cagr else best_cagr_m["label"]
+            cagr_winner_val = bnh_cagr if bnh_cagr >= bc_cagr else bc_cagr
+            for title, val, sub, clr in [
+                ("CAGR 最高",
+                 f"{cagr_winner_val:.1f}%",
+                 cagr_winner_lbl,
+                 C_YELLOW),
+                ("Calmar 最佳（信號）",
+                 f"{bcal:.2f}",
+                 best_calmar_m["label"],
+                 C_GREEN if bcal >= 0.3 else (C_YELLOW if bcal >= 0.15 else C_GRAY)),
+                ("MDD 最低（信號）",
+                 f"{bm_mdd:.1f}%",
+                 best_mdd_m["label"],
+                 C_GREEN if bm_mdd > -15 else (C_YELLOW if bm_mdd > -25 else "#e17055")),
+            ]:
+                card2 = ctk.CTkFrame(r1, fg_color="#0f1a2a", corner_radius=6)
+                card2.pack(side="left", padx=6, pady=2)
+                ctk.CTkLabel(card2, text=title, font=(self.ui_font, 9),
+                             text_color=C_GRAY).pack(pady=(5, 0), padx=14)
+                ctk.CTkLabel(card2, text=val, font=(self.ui_font, 14, "bold"),
+                             text_color=clr).pack(padx=14)
+                ctk.CTkLabel(card2, text=sub, font=(self.ui_font, 8),
+                             text_color=C_GRAY).pack(pady=(0, 5), padx=14)
+
+            # ── 信號 vs B&H vs DCA 差距行 ──────────────────────────────
+            r2 = ctk.CTkFrame(conc, fg_color="transparent")
+            r2.pack(fill="x", padx=14, pady=(2, 2))
+            gap_clr = C_GREEN if gap < 2 else (C_YELLOW if gap < 6 else "#e17055")
+            sig_line = (f"最佳信號策略  {best_cagr_m['label']}  CAGR {bc_cagr:.1f}%"
+                        f"   vs   B&H {bnh_cagr:.1f}%   差距 {gap:+.1f}%")
+            ctk.CTkLabel(r2, text=sig_line, font=(self.ui_font, 10),
+                         text_color=gap_clr).pack(side="left")
+
+            # DCA 比較（若有快取）
+            try:
+                dca_strats_for_conc = dca_row.get("strategies", []) if dca_row else []
+                if dca_strats_for_conc:
+                    best_dca = max(dca_strats_for_conc, key=lambda s: s.get("cagr_pct", 0))
+                    dca_cagr = best_dca.get("cagr_pct", 0)
+                    dca_gap  = bnh_cagr - dca_cagr
+                    dca_line = f"   │   最佳 DCA  {best_dca['label']}  {dca_cagr:.1f}%  差距 {dca_gap:+.1f}%"
+                    ctk.CTkLabel(r2, text=dca_line, font=(self.ui_font, 10),
+                                 text_color=C_GRAY).pack(side="left")
+            except Exception:
+                pass
+
+            # ── 建議文字 ────────────────────────────────────────────────
+            if gap < 1.5:
+                verdict = (f"信號策略與 B&H CAGR 差距極小（{gap:.1f}%），"
+                           f"但 MDD {bm_mdd:.1f}% 顯著低於 B&H，適合風險控管優先的投資人。"
+                           f" 推薦：{best_mdd_m['label']} 作為主策略。")
+            elif gap < 5:
+                verdict = (f"信號策略 CAGR 較 B&H 少 {gap:.1f}%，"
+                           f"但 Calmar {bcal:.2f} 代表每承受 1% 回撤能獲得 {bcal:.2f}% 報酬，風險報酬比可接受。"
+                           f" 追求報酬選 B&H；在意下行保護選 {best_calmar_m['label']}。")
+            elif gap < 10:
+                verdict = (f"B&H 優勢較明顯（差距 {gap:.1f}%）。"
+                           f"信號策略主要價值在降低 MDD（{bm_mdd:.1f}%），但犧牲了部分報酬。"
+                           f" 建議以 B&H 為主，遇 STRONG BUY 時加碼（{best_calmar_m['label']} 模式）。")
+            else:
+                verdict = (f"此股票長期趨勢強勁，B&H 大幅領先（差距 {gap:.1f}%）。"
+                           f"信號策略因訊號過保守或頻繁錯過強勢段，不建議主動操作。"
+                           f" 直接持有為最優解；Calmar {bcal:.2f} 僅供參考。")
+
+            r3 = ctk.CTkFrame(conc, fg_color="#0d1525", corner_radius=4)
+            r3.pack(fill="x", padx=10, pady=(4, 10))
+            ctk.CTkLabel(r3, text=f"💡 {verdict}",
+                         font=(self.ui_font, 10), text_color=C_WHITE,
+                         wraplength=840, justify="left"
+                         ).pack(anchor="w", padx=12, pady=7)
+
     # ════════════════════════════════════════════════════════════════════
     # 跟單回測 資產曲線圖
     # ════════════════════════════════════════════════════════════════════

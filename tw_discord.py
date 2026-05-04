@@ -393,8 +393,8 @@ def send_scan_results(results: list[dict], dca_cache: dict | None = None) -> Non
                 continue
             buy_embeds.append(build_buy_embed(r, cfg, dca_cache=dca_cache))
 
-        # 賣出推播（持股 + 非持股觀察）
-        if "SELL" in types:
+        # 賣出推播（僅限持股）
+        if "SELL" in types and in_portfolio:
             sell_embeds.append(build_sell_embed(r, cfg, dca_cache=dca_cache,
                                                 in_portfolio=in_portfolio))
 

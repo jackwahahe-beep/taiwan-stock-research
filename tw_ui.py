@@ -46,6 +46,35 @@ STOCK_EARLIEST_YEAR = {
     "00713.TW": 2018,  # 上市 2017-12，2017 年資料僅半個月
 }
 
+# 台股重大股災定義（用於回測策略應對分析）
+CRASH_PERIODS = [
+    ("中美貿易戰",  "2018-10-01", "2018-12-31"),  # TWII -22%
+    ("COVID 股災",  "2020-02-20", "2020-04-30"),   # TWII -28%
+    ("升息熊市",    "2022-01-01", "2022-10-31"),   # TWII -40%
+    ("日圓套息平倉","2024-07-31", "2024-08-20"),   # TWII -12%（急跌）
+]
+
+
+def _crash_analysis(trades: list[dict], crash_start: str, crash_end: str) -> dict:
+    """計算某策略在特定股災期間的進出場行為。"""
+    from datetime import date as _date, timedelta
+    entries = sum(1 for t in trades
+                  if crash_start <= t.get("entry_date", "") <= crash_end)
+    trail_exits = sum(1 for t in trades
+                      if t.get("exit_signal") == "TRAILING_STOP"
+                      and crash_start <= t.get("exit_date", "") <= crash_end)
+    sell_exits = sum(1 for t in trades
+                     if t.get("exit_signal") in ("SELL", "TRIM")
+                     and crash_start <= t.get("exit_date", "") <= crash_end)
+    pre_start = (_date.fromisoformat(crash_start) - timedelta(days=45)).isoformat()
+    pre_exits = sum(1 for t in trades
+                    if t.get("exit_signal") not in ("PERIOD_END",)
+                    and pre_start <= t.get("exit_date", "") < crash_start
+                    and t.get("pnl_net", 0) > 0)
+    return {"entries": entries, "trail_exits": trail_exits,
+            "sell_exits": sell_exits, "pre_exits": pre_exits}
+
+
 CATEGORY = {
     "0050.TW":  ("ETF 基準", "B&H"),
     "00878.TW": ("高息 ETF", "BUY"),
@@ -2009,6 +2038,56 @@ class TwStrategyApp(ctk.CTk):
             except Exception:
                 pass
 
+            # ── 股災應對分析 ──────────────────────────────────────────────
+            bt_start = result.get("start_date", "2015-01-01")
+            bt_end_r = result.get("end_date",   "2025-12-31")
+            in_range = [(nm, cs, ce) for nm, cs, ce in CRASH_PERIODS
+                        if cs <= bt_end_r and ce >= bt_start]
+
+            rep_trades = best_calmar_m.get("trades", [])
+            crash_entries_total = 0
+            crash_trail_total   = 0
+            crash_no_signal     = 0
+
+            if in_range:
+                rc_hdr = ctk.CTkFrame(conc, fg_color="transparent")
+                rc_hdr.pack(fill="x", padx=14, pady=(6, 0))
+                ctk.CTkLabel(rc_hdr, text="📉 歷次股災應對（代表策略：" + best_calmar_m["label"] + "）",
+                             font=(self.ui_font, 10, "bold"), text_color=C_YELLOW
+                             ).pack(side="left")
+                ctk.CTkLabel(rc_hdr,
+                             text="（B&H 無條件持有，依賴長期均值回歸）",
+                             font=(self.ui_font, 9), text_color=C_GRAY
+                             ).pack(side="left", padx=6)
+
+                for crash_name, cs, ce in in_range:
+                    st = _crash_analysis(rep_trades, cs, ce)
+                    crash_entries_total += st["entries"]
+                    crash_trail_total   += st["trail_exits"]
+
+                    parts = []
+                    if st["entries"] > 0:
+                        parts.append(f"逢低進場 {st['entries']} 次 ✓")
+                    if st["trail_exits"] > 0:
+                        parts.append(f"追蹤止盈出場 {st['trail_exits']} 次 ✓")
+                    if st["sell_exits"] > 0:
+                        parts.append(f"SELL 出場 {st['sell_exits']} 次")
+                    if st["pre_exits"] > 0:
+                        parts.append(f"股災前 45 天已鎖利出場 {st['pre_exits']} 次 ✓")
+                    if not parts:
+                        parts.append("無信號觸發，同 B&H 持有")
+                        crash_no_signal += 1
+
+                    sig_desc = "；".join(parts)
+                    # B&H always holds
+                    bnh_desc = "持有不動（靠時間復甦）"
+                    row_clr = "#7fba5a" if st["entries"] > 0 or st["trail_exits"] > 0 or st["pre_exits"] > 0 else "#a0a0b8"
+                    row_txt = f"  【{crash_name} {cs[:7]}~{ce[:7]}】  信號：{sig_desc}　｜　B&H：{bnh_desc}"
+                    ctk.CTkLabel(conc, text=row_txt,
+                                 font=(self.ui_font, 10), text_color=row_clr,
+                                 wraplength=860, justify="left"
+                                 ).pack(anchor="w", padx=12, pady=(1, 0))
+
             # ── 建議文字 ────────────────────────────────────────────────
             if gap < 1.5:
                 verdict = (f"信號策略與 B&H CAGR 差距極小（{gap:.1f}%），"
@@ -2027,14 +2106,27 @@ class TwStrategyApp(ctk.CTk):
                            f"信號策略因訊號過保守或頻繁錯過強勢段，不建議主動操作。"
                            f" 直接持有為最優解；Calmar {bcal:.2f} 僅供參考。")
 
+            # 把股災行為融入建議文字
+            if crash_entries_total > 0:
+                verdict += (f" 歷次股災期間逢低進場共 {crash_entries_total} 次，"
+                            f"DCA 效果可攤低持倉成本，有助回升後超越 B&H。")
+            elif in_range and crash_no_signal == len(in_range):
+                verdict += (" 歷次股災期間均無 BUY 信號觸發（條件過嚴或已深套），"
+                            "策略與 B&H 同等待機，無法主動攤平。")
+            if crash_trail_total > 0:
+                verdict += (f" 追蹤止盈在股災期間觸發 {crash_trail_total} 次，"
+                            f"部分鎖定了高點利潤，降低了實際持倉虧損。")
+
             # ── 未來改善空間 ─────────────────────────────────────────────
             tips = []
             if gap >= 8:
-                tips.append("Walk-Forward 驗證：用前段訓練、後段驗證，確認策略失效或只是參數需要再調整")
+                tips.append("Walk-Forward 驗證：確認策略是否真的失效，或只是參數需再調整")
             if abs(bm_mdd) >= 25:
                 tips.append(f"追蹤止盈（Trailing Stop 15%）：MDD {bm_mdd:.1f}% 偏高，可提前鎖定回撤期利潤")
             if bcal < 0.2 and gap < 10:
                 tips.append("動態倉位（Dynamic Sizing）：Calmar 偏低，回撤擴大時縮小投入可改善風險報酬比")
+            if in_range and crash_no_signal == len(in_range):
+                tips.append("股災期間從未觸發進場：考慮在大盤 DD>20% 時自動放寬 RSI 門檻以捕捉底部機會")
             if gap >= 5 and gap < 8:
                 tips.append("嘗試放寬 AVWAP 乘數（b1/b2）或 RSI 閾值，信號過嚴可能錯過太多進場機會")
             if not tips:

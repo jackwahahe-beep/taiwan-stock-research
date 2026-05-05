@@ -92,6 +92,139 @@ CATEGORY = {
     "2408.TW":  ("記憶體",   "BUY"),
 }
 
+# ── 懸停提示工具 ────────────────────────────────────────────────────────────────
+
+class _Tooltip:
+    """在任何 tk/ctk widget 上顯示懸停說明泡泡（450ms 延遲）。"""
+    _BG = "#1e2d40"
+    _FG = "#dce8f0"
+
+    def __init__(self, widget, text: str):
+        self._w    = widget
+        self._text = text
+        self._win  = None
+        self._job  = None
+        widget.bind("<Enter>",   self._enter,  add="+")
+        widget.bind("<Leave>",   self._leave,  add="+")
+        widget.bind("<Destroy>", self._leave,  add="+")
+
+    def _enter(self, _=None):
+        self._job = self._w.after(450, self._show)
+
+    def _leave(self, _=None):
+        if self._job:
+            self._w.after_cancel(self._job)
+            self._job = None
+        if self._win:
+            self._win.destroy()
+            self._win = None
+
+    def _show(self):
+        import tkinter as _tk
+        if self._win:
+            return
+        x = self._w.winfo_rootx() + self._w.winfo_width() // 2
+        y = self._w.winfo_rooty() + self._w.winfo_height() + 4
+        self._win = tw = _tk.Toplevel(self._w)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        try:
+            tw.attributes("-topmost", True)
+        except Exception:
+            pass
+        f = _tk.Frame(tw, bg=self._BG, bd=1, relief="solid")
+        f.pack()
+        _tk.Label(f, text=self._text, bg=self._BG, fg=self._FG,
+                  font=("Consolas", 9), justify="left",
+                  padx=7, pady=5, wraplength=290).pack()
+
+
+def _add_tree_col_tips(tree, tips: dict) -> None:
+    """在 Treeview 欄位標題上顯示懸停說明。"""
+    import tkinter as _tk
+    _state = {"win": None, "col": None}
+
+    def _hide():
+        if _state["win"]:
+            _state["win"].destroy()
+            _state["win"] = None
+        _state["col"] = None
+
+    def _motion(event):
+        if tree.identify_region(event.x, event.y) != "heading":
+            _hide()
+            return
+        try:
+            col_id = tree["columns"][int(tree.identify_column(event.x)[1:]) - 1]
+        except (ValueError, IndexError):
+            _hide()
+            return
+        text = tips.get(col_id)
+        if not text:
+            _hide()
+            return
+        if _state["col"] == col_id:
+            return
+        _hide()
+        _state["col"] = col_id
+        x = tree.winfo_rootx() + event.x + 12
+        y = tree.winfo_rooty() + event.y + 22
+        _state["win"] = tw = _tk.Toplevel(tree)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        try:
+            tw.attributes("-topmost", True)
+        except Exception:
+            pass
+        f = _tk.Frame(tw, bg="#1e2d40", bd=1, relief="solid")
+        f.pack()
+        _tk.Label(f, text=text, bg="#1e2d40", fg="#dce8f0",
+                  font=("Consolas", 9), justify="left",
+                  padx=7, pady=5, wraplength=270).pack()
+
+    tree.bind("<Motion>", _motion, add="+")
+    tree.bind("<Leave>",  lambda e: _hide(), add="+")
+
+
+# ── 欄位說明文字 ─────────────────────────────────────────────────────────────────
+
+_SCAN_COL_TIPS: dict[str, str] = {
+    "rsi":       "RSI（Relative Strength Index）相對強弱指數\n14日計算。< 30 超賣，> 70 超買\n各股買賣閾值依個股設定（ETF 約 42，科技股約 50）",
+    "avwap":     "AVWAP（Anchored VWAP）錨定成交量加權均價\n從近60日低點錨定計算，為買賣核心參考錨點\n低於 AVWAP = 相對便宜，高於 = 相對昂貴",
+    "avwap_dist":"現價 vs AVWAP 的距離百分比\n負值 = 低於 AVWAP（潛在買入區）\n正值 = 高於 AVWAP（潛在賣出區）",
+    "b1":        "試買參考價（AVWAP × b1）\nBUY 信號觸發條件之一：現價 < b1\n代表輕度低估，適合首次建倉",
+    "b2":        "加碼參考價（AVWAP × b2）\nSTRONG BUY 觸發條件之一：現價 < b2\n更深度低估，適合加碼",
+    "s_target":  "賣出參考價（AVWAP × s）\nSELL 信號觸發條件之一：現價 > s_target\n代表達到目標估值，應考慮獲利了結",
+    "dd":        "回撤（Drawdown）\n從近60日最高收盤的跌幅（負值）\n≤ -10% 觸發 BUY，≤ -20% 觸發 STRONG BUY",
+    "rec":       "DCA 10年回測建議策略\nB&H = 長期持有最優；其他策略名稱 = 擇時加碼優於 B&H",
+    "pnl":       "估算持股損益（需在持股清單中）\n以現價估算，含未實現損益",
+}
+
+_DCA_METRIC_TIPS: dict[str, str] = {
+    "CAGR":  "年化複合報酬率（Compound Annual Growth Rate）\n考慮持有年數的真實年化報酬\n> 12% 良好，> 20% 優秀",
+    "總報酬": "回測期間的總累積報酬百分比（未年化）",
+    "MDD":   "最大回撤（Max Drawdown）\n從投資組合高點到最低點的最大跌幅\n越接近 0 越好；< -30% 代表高風險",
+    "終值":   "回測結束時投資組合的估算總市值",
+    "注資":   "回測期間的總投入資金（定期定額累計）",
+    "交易次": "回測期間的總買入次數（加碼筆數）",
+}
+
+_SBT_METRIC_TIPS: dict[str, str] = {
+    "報酬率":    "回測期間整體累積報酬率（未年化）",
+    "CAGR":     "年化複合報酬率\n> 15% 良好，> 25% 優秀",
+    "Calmar":   "Calmar 比率 = CAGR ÷ |MDD|\n每承擔 1% 最大回撤能獲得多少年化報酬\n> 0.3 良好，> 0.5 優秀，> 1.0 卓越",
+    "總損益":    "回測期間的總實現損益（NT$）",
+    "MDD":      "最大回撤（Max Drawdown）\n從淨值高點到最低點的最大虧損幅度\n< -10% 可接受，< -20% 需特別注意",
+    "手續費+稅": "回測期間估算的交易成本\n手續費 0.1425% + 證交稅 0.3%（賣方）",
+    "勝率":     "獲利交易筆數 ÷ 總交易筆數\n> 60% 良好，但需同時觀察 Calmar",
+    "交易次":    "回測期間的總交易筆數\n< 10 筆時統計意義較低",
+    "平均持有":  "每筆交易從進場到出場的平均持有天數",
+    "最佳":     "單筆最高報酬的交易報酬率",
+    "最差":     "單筆最大虧損的交易報酬率",
+    "期末未結":  "回測結束時尚未出場的持倉數量\n以期末收盤價估算損益（非真實出場價）",
+}
+
+
 SCAN_COLS = [
     ("symbol",    "代號",      80,  "w"),
     ("name",      "名稱",     100,  "w"),
@@ -310,6 +443,7 @@ class TwStrategyApp(ctk.CTk):
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        _add_tree_col_tips(self.tree, _SCAN_COL_TIPS)
 
         for tag, fg, bg in [
             ("strong_buy",    C_STRONG,  BG_ROW_A),
@@ -549,6 +683,8 @@ class TwStrategyApp(ctk.CTk):
                              font=(self.ui_font, 10), text_color=C_GRAY).pack()
                 ctk.CTkLabel(col, text=val,
                              font=(self.ui_font, 11, "bold"), text_color=clr).pack()
+                if label in _DCA_METRIC_TIPS:
+                    _Tooltip(col, _DCA_METRIC_TIPS[label])
 
             txs = strat.get("transactions", strat.get("last_tx", []))
             if txs:
@@ -1640,6 +1776,10 @@ class TwStrategyApp(ctk.CTk):
 
         for w in self._sbt_detail.winfo_children():
             w.destroy()
+        try:
+            self._sbt_detail._parent_canvas.yview_moveto(0)
+        except Exception:
+            pass
 
         result   = self._sbt_cache.get(self._sbt_ck(sym))
         yr_range = f"{self._sbt_start_var.get()}–{self._sbt_end_var.get()}"
@@ -1710,6 +1850,10 @@ class TwStrategyApp(ctk.CTk):
     def _sbt_show_result(self, sym: str, name: str, result: dict):
         for w in self._sbt_detail.winfo_children():
             w.destroy()
+        try:
+            self._sbt_detail._parent_canvas.yview_moveto(0)
+        except Exception:
+            pass
 
         bnh   = result.get("bnh", {})
         modes = result.get("modes", [])
@@ -1973,6 +2117,8 @@ class TwStrategyApp(ctk.CTk):
                              font=(self.ui_font, 9), text_color=C_GRAY).pack()
                 ctk.CTkLabel(col, text=val,
                              font=(self.ui_font, 11, "bold"), text_color=clr).pack()
+                if label in _SBT_METRIC_TIPS:
+                    _Tooltip(col, _SBT_METRIC_TIPS[label])
 
             # 出場方式細分
             if trades:

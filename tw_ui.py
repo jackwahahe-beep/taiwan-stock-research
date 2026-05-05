@@ -2465,10 +2465,10 @@ class TwStrategyApp(ctk.CTk):
                 import matplotlib.ticker as mticker
 
                 lbl.destroy()
-                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 5.5),
-                                               gridspec_kw={"height_ratios": [3, 1]},
+                fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(9, 7.5),
+                                               gridspec_kw={"height_ratios": [3, 1, 1]},
                                                facecolor="#0f1a30")
-                fig.subplots_adjust(hspace=0.08, left=0.09, right=0.98, top=0.93, bottom=0.08)
+                fig.subplots_adjust(hspace=0.08, left=0.09, right=0.98, top=0.93, bottom=0.06)
 
                 colors = ["#74b9ff", "#2ecc71", "#1abc9c", "#f39c12", "#e74c3c", "#a29bfe"]
                 for i, (label, series) in enumerate(curves.items()):
@@ -2594,10 +2594,28 @@ class TwStrategyApp(ctk.CTk):
                     pass
 
                 ax2.set_facecolor("#0d1b2a")
-                ax2.set_ylabel("DD%", color="#95a5a6", fontsize=8)
+                ax2.set_ylabel("股價DD%", color="#95a5a6", fontsize=8)
                 ax2.tick_params(colors="#95a5a6", labelsize=8)
                 ax2.grid(color="#1e3a5f", linewidth=0.3)
                 ax2.spines[:].set_color("#2a3a5a")
+                ax2.tick_params(labelbottom=False)
+
+                # ── 水下曲線（各策略組合回撤）─────────────────────────────────
+                for i, (label, series) in enumerate(curves.items()):
+                    if series is None or len(series) == 0:
+                        continue
+                    uw = (series / series.cummax() - 1) * 100
+                    c  = colors[i % len(colors)]
+                    ax3.fill_between(series.index, uw, 0, alpha=0.25, color=c)
+                    ax3.plot(series.index, uw, color=c, linewidth=0.8,
+                             linestyle="--" if "B&H" in label else "-")
+                ax3.axhline(y=-10, color="#f39c12", linewidth=0.6, linestyle="--", alpha=0.7)
+                ax3.axhline(y=-20, color="#e74c3c", linewidth=0.6, linestyle="--", alpha=0.7)
+                ax3.set_facecolor("#0d1b2a")
+                ax3.set_ylabel("水下%", color="#95a5a6", fontsize=8)
+                ax3.tick_params(colors="#95a5a6", labelsize=8)
+                ax3.grid(color="#1e3a5f", linewidth=0.3)
+                ax3.spines[:].set_color("#2a3a5a")
 
                 canvas = FigureCanvasTkAgg(fig, master=win)
                 canvas.draw()

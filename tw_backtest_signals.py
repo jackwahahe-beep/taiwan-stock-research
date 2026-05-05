@@ -40,6 +40,10 @@ ETF_SYMBOLS = {"0050.TW", "00878.TW", "00713.TW", "00929.TW", "00919.TW", "00620
 
 COMMISSION_RATE = 0.001425   # 券商手續費 0.1425%（買賣均收）
 TAX_RATE        = 0.003      # 台灣證券交易稅 0.3%（僅賣出方）
+SLIPPAGE        = 0.001      # 滑價 0.1%（買進加，賣出減）
+
+PORTFOLIO_INITIAL  = 1_200_000   # 組合回測初始資金 NT$
+PORTFOLIO_LOT_PCT  = 0.10        # 每筆進場佔初始資金比例（10%）
 
 
 # ── 資料拉取 ──────────────────────────────────────────────────────────────
@@ -141,6 +145,10 @@ def _daily_signals(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     sig.loc[is_sbuy, "signal"] = "STRONG BUY"
     sig.loc[is_buy,  "signal"] = "BUY"
     sig.loc[is_sell, "signal"] = "SELL"
+
+    # 隔日開盤價（供 _simulate 做隔日執行）；最後一天無次日故為 NaN
+    open_px = df["Open"].reindex(close.index).fillna(close)
+    sig["next_open"] = open_px.shift(-1).reindex(sig.index)
     return sig
 
 
@@ -201,6 +209,12 @@ def _simulate(sig: pd.DataFrame,
         date_str = dt.date().isoformat()
         vs_avwap = round((price / avwap - 1) * 100, 1) if avwap > 0 else None
 
+        # 隔日開盤執行價（若無次日資料則退回當日收盤）
+        _no = row.get("next_open") if "next_open" in row.index else None
+        _exec_raw    = float(_no) if (_no is not None and not pd.isna(_no) and _no > 0) else price
+        exec_buy_px  = _exec_raw * (1 + SLIPPAGE)   # 買進：滑價加
+        exec_sell_px = _exec_raw * (1 - SLIPPAGE)   # 賣出：滑價減
+
         # ── 工具函式：計算賣出淨回收 ──────────────────────────────────
         def _sell_net(lot, exit_price):
             gross    = lot["shares"] * exit_price
@@ -216,17 +230,17 @@ def _simulate(sig: pd.DataFrame,
                 if price > lot.get("peak_price", lot["entry_price"]):
                     lot["peak_price"] = price
 
-        # 1. TRIM：淨獲利達門檻即出清（B：門檻 30%）
+        # 1. TRIM：淨獲利達門檻即出清（B：門檻 30%；以收盤判斷條件，隔日開盤執行）
         if trim_en and open_lots:
             keep = []
             for lot in open_lots:
-                net_hyp, pnl_hyp, _ = _sell_net(lot, price)
+                net_hyp, pnl_hyp, _ = _sell_net(lot, price)   # 以收盤判斷條件
                 profit_pct = pnl_hyp / lot["cost"] * 100
                 if profit_pct >= TRIM_PROFIT:
-                    net, pnl, all_fees = _sell_net(lot, price)
+                    net, pnl, all_fees = _sell_net(lot, exec_sell_px)  # 隔日開盤執行
                     hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
                     trades.append({**lot,
-                                   "exit_date": date_str, "exit_price": round(price, 2),
+                                   "exit_date": date_str, "exit_price": round(exec_sell_px, 2),
                                    "proceeds": round(net, 0), "pnl": round(pnl, 0),
                                    "pnl_pct": round(pnl / lot["cost"] * 100, 2),
                                    "hold_days": hd, "exit_signal": "TRIM",
@@ -239,16 +253,16 @@ def _simulate(sig: pd.DataFrame,
 
         just_sold = False
 
-        # 1b. TRAILING STOP：持倉從最高點回落 ≥ TRAIL_STOP_PCT 則出場
+        # 1b. TRAILING STOP：持倉從最高點回落 ≥ TRAIL_STOP_PCT 則出場（隔日開盤執行）
         if trail_en and open_lots:
             keep = []
             for lot in open_lots:
                 peak = lot.get("peak_price", lot["entry_price"])
-                if price <= peak * (1 - TRAIL_STOP_PCT):
-                    net, pnl, all_fees = _sell_net(lot, price)
+                if price <= peak * (1 - TRAIL_STOP_PCT):   # 收盤觸發條件
+                    net, pnl, all_fees = _sell_net(lot, exec_sell_px)
                     hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
                     trades.append({**lot,
-                                   "exit_date": date_str, "exit_price": round(price, 2),
+                                   "exit_date": date_str, "exit_price": round(exec_sell_px, 2),
                                    "proceeds": round(net, 0), "pnl": round(pnl, 0),
                                    "pnl_pct": round(pnl / lot["cost"] * 100, 2),
                                    "hold_days": hd, "exit_signal": "TRAILING_STOP",
@@ -261,14 +275,14 @@ def _simulate(sig: pd.DataFrame,
                     keep.append(lot)
             open_lots = keep
 
-        # 2. SELL：關閉所有持倉（C：ETF 跳過）
+        # 2. SELL：關閉所有持倉（C：ETF 跳過；隔日開盤執行）
         if curr_sig == "SELL" and open_lots and not is_etf:
             ec = {"RSI": round(rsi, 1), "vs_AVWAP%": vs_avwap}
             for lot in open_lots:
-                net, pnl, all_fees = _sell_net(lot, price)
+                net, pnl, all_fees = _sell_net(lot, exec_sell_px)
                 hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
                 trades.append({**lot,
-                               "exit_date": date_str, "exit_price": round(price, 2),
+                               "exit_date": date_str, "exit_price": round(exec_sell_px, 2),
                                "proceeds": round(net, 0), "pnl": round(pnl, 0),
                                "pnl_pct": round(pnl / lot["cost"] * 100, 2),
                                "hold_days": hd, "exit_signal": "SELL",
@@ -278,20 +292,20 @@ def _simulate(sig: pd.DataFrame,
             open_lots = []
             just_sold = True
 
-        # ── 工具函式：執行買進（含手續費）─────────────────────────────
+        # ── 工具函式：執行買進（含手續費；隔日開盤執行）──────────────
         def _buy_lot(signal_name, max_spend):
             nonlocal cash
-            shares = int(max_spend // (price * (1 + COMMISSION_RATE)))
+            shares = int(max_spend // (exec_buy_px * (1 + COMMISSION_RATE)))
             if shares <= 0:
                 return False
-            gross   = shares * price
+            gross   = shares * exec_buy_px
             b_fee   = round(gross * COMMISSION_RATE, 0)
             cost    = gross + b_fee
             cash   -= cost
             open_lots.append({
-                "entry_date": date_str, "entry_price": round(price, 2),
+                "entry_date": date_str, "entry_price": round(exec_buy_px, 2),
                 "shares": shares, "cost": round(cost, 0), "entry_signal": signal_name,
-                "buy_fee": b_fee, "peak_price": price,
+                "buy_fee": b_fee, "peak_price": price,   # peak 仍用收盤追蹤
                 "entry_cond": {"DD%": round(dd, 1), "RSI": round(rsi, 1),
                                "vs_AVWAP%": vs_avwap},
             })
@@ -707,6 +721,189 @@ def build_signal_backtest_embed(result: dict) -> dict:
         ],
     }
 
+
+# ── 組合回測（多股共用資金池）────────────────────────────────────────────────
+
+def run_portfolio_backtest(
+    symbols_cfg: list[dict],
+    initial_capital: float = PORTFOLIO_INITIAL,
+    lot_pct: float = PORTFOLIO_LOT_PCT,
+    start_date: str = START_DATE,
+    end_date: str = END_DATE,
+) -> dict:
+    """
+    多股票共用資金池回測。
+    - 無年度注資，一次性投入 initial_capital
+    - 每筆進場 = lot_pct × initial_capital；STRONG BUY 用 1.5 倍
+    - 多個信號同日：STRONG BUY 優先，次按 RSI 由低到高（最超賣先進）
+    - 隔日開盤執行 + SLIPPAGE 滑價
+    """
+    # 1. 拉資料 + 計算信號
+    all_sigs: dict[str, pd.DataFrame] = {}
+    all_names: dict[str, str] = {}
+    for cfg in symbols_cfg:
+        sym, name = cfg["symbol"], cfg["name"]
+        df = _fetch(sym, start=start_date, end=end_date)
+        if df.empty or len(df) < 200:
+            continue
+        sig = _daily_signals(df, sym)
+        if len(sig) < 100:
+            continue
+        all_sigs[sym]  = sig
+        all_names[sym] = name
+
+    if not all_sigs:
+        return {"error": "無有效資料"}
+
+    # 2. 統一日期軸
+    all_dates = sorted(set().union(*[s.index for s in all_sigs.values()]))
+
+    # 3. 模擬
+    cash       = float(initial_capital)
+    positions: dict[str, dict] = {}   # {sym: {shares, cost, entry_price, entry_date, buy_fee, entry_signal}}
+    trades:    list[dict] = []
+    equity_ts: dict = {}
+    lot_size   = initial_capital * lot_pct
+
+    for dt in all_dates:
+        # 收集當日各股狀態
+        day: dict[str, dict] = {}
+        for sym, sig in all_sigs.items():
+            if dt not in sig.index:
+                continue
+            row   = sig.loc[dt]
+            no    = row.get("next_open") if "next_open" in row.index else None
+            eraw  = float(no) if (no is not None and not pd.isna(no) and no > 0) else float(row["close"])
+            day[sym] = {
+                "close":     float(row["close"]),
+                "signal":    str(row["signal"]),
+                "rsi":       float(row["rsi"]),
+                "avwap":     float(row["avwap"]),
+                "dd_pct":    float(row["dd_pct"]),
+                "exec_buy":  eraw * (1 + SLIPPAGE),
+                "exec_sell": eraw * (1 - SLIPPAGE),
+            }
+
+        if not day:
+            continue
+        date_str = dt.date().isoformat()
+
+        # 3a. 出場（SELL 信號，ETF 跳過）
+        for sym in list(positions.keys()):
+            if sym not in day:
+                continue
+            d = day[sym]
+            if d["signal"] == "SELL" and sym not in ETF_SYMBOLS:
+                pos      = positions.pop(sym)
+                ep       = d["exec_sell"]
+                gross    = pos["shares"] * ep
+                s_fee    = round(gross * (COMMISSION_RATE + TAX_RATE), 0)
+                net      = gross - s_fee
+                pnl      = net - pos["cost"]
+                all_fees = s_fee + pos.get("buy_fee", 0)
+                hd       = (dt.date() - _date.fromisoformat(pos["entry_date"])).days
+                trades.append({
+                    "symbol": sym, "name": all_names[sym],
+                    "entry_date": pos["entry_date"], "entry_price": pos["entry_price"],
+                    "exit_date": date_str, "exit_price": round(ep, 2),
+                    "shares": pos["shares"], "cost": round(pos["cost"], 0),
+                    "proceeds": round(net, 0), "pnl": round(pnl, 0),
+                    "pnl_pct": round(pnl / pos["cost"] * 100, 2),
+                    "hold_days": hd, "exit_signal": "SELL",
+                    "fees": round(all_fees, 0), "entry_signal": pos.get("entry_signal", ""),
+                })
+                cash += net
+
+        # 3b. 進場（依優先級：STRONG BUY > BUY；同級按 RSI 升序）
+        candidates = [
+            (0 if d["signal"] == "STRONG BUY" else 1, d["rsi"], sym, d)
+            for sym, d in day.items()
+            if sym not in positions and d["signal"] in ("BUY", "STRONG BUY")
+        ]
+        candidates.sort(key=lambda x: (x[0], x[1]))
+
+        for pri, _, sym, d in candidates:
+            spend = lot_size * (1.5 if pri == 0 else 1.0)
+            if cash < spend * 0.5:
+                break
+            ep     = d["exec_buy"]
+            shares = int(min(cash, spend) // (ep * (1 + COMMISSION_RATE)))
+            if shares <= 0:
+                continue
+            gross  = shares * ep
+            b_fee  = round(gross * COMMISSION_RATE, 0)
+            cost   = gross + b_fee
+            cash  -= cost
+            positions[sym] = {
+                "shares": shares, "cost": round(cost, 0),
+                "entry_price": round(ep, 2), "entry_date": date_str,
+                "buy_fee": b_fee, "entry_signal": d["signal"],
+            }
+
+        # 3c. 當日組合市值
+        open_val = sum(pos["shares"] * day[sym]["close"]
+                       for sym, pos in positions.items() if sym in day)
+        equity_ts[dt] = cash + open_val
+
+    # 4. 期末強制平倉
+    last_dt = max(sig.index[-1] for sig in all_sigs.values())
+    for sym, pos in list(positions.items()):
+        lp   = float(all_sigs[sym]["close"].iloc[-1]) if sym in all_sigs else pos["entry_price"]
+        ep   = lp * (1 - SLIPPAGE)
+        gross  = pos["shares"] * ep
+        s_fee  = round(gross * (COMMISSION_RATE + TAX_RATE), 0)
+        net    = gross - s_fee
+        pnl    = net - pos["cost"]
+        all_f  = s_fee + pos.get("buy_fee", 0)
+        hd     = (last_dt.date() - _date.fromisoformat(pos["entry_date"])).days
+        trades.append({
+            "symbol": sym, "name": all_names[sym],
+            "entry_date": pos["entry_date"], "entry_price": pos["entry_price"],
+            "exit_date": last_dt.date().isoformat(), "exit_price": round(ep, 2),
+            "shares": pos["shares"], "cost": round(pos["cost"], 0),
+            "proceeds": round(net, 0), "pnl": round(pnl, 0),
+            "pnl_pct": round(pnl / pos["cost"] * 100, 2),
+            "hold_days": hd, "exit_signal": "PERIOD_END",
+            "fees": round(all_f, 0), "entry_signal": pos.get("entry_signal", ""),
+        })
+        cash += net
+
+    # 5. 指標計算
+    eq = pd.Series(equity_ts).sort_index()
+    if eq.empty:
+        return {"error": "無交易資料"}
+
+    years       = max(1.0, (eq.index[-1] - eq.index[0]).days / 365.25)
+    final_val   = float(eq.iloc[-1])
+    cagr        = ((final_val / initial_capital) ** (1 / years) - 1) * 100
+    underwater  = (eq / eq.cummax() - 1) * 100
+    mdd         = float(underwater.min())
+    calmar      = round(-cagr / mdd, 2) if mdd < 0 else 0.0
+    closed      = [t for t in trades if t["exit_signal"] != "PERIOD_END"]
+    n_wins      = sum(1 for t in closed if t.get("pnl", 0) > 0)
+    total_fees  = sum(t.get("fees", 0) for t in trades)
+
+    print(f"[組合回測] {len(all_sigs)}檔  初始 NT${initial_capital:,.0f}"
+          f"  → NT${final_val:,.0f}  CAGR {cagr:+.1f}%  MDD {mdd:.1f}%  Calmar {calmar:.2f}")
+
+    return {
+        "initial_capital": initial_capital,
+        "final_value":     round(final_val, 0),
+        "total_pnl":       round(final_val - initial_capital, 0),
+        "cagr_pct":        round(cagr, 1),
+        "mdd_pct":         round(mdd, 1),
+        "calmar":          calmar,
+        "n_trades":        len(closed),
+        "n_wins":          n_wins,
+        "win_rate":        round(n_wins / len(closed) * 100, 1) if closed else 0.0,
+        "total_fees":      round(total_fees, 0),
+        "equity_series":   eq,
+        "underwater":      underwater,
+        "trades":          trades,
+        "start_date":      eq.index[0].date().isoformat(),
+        "end_date":        eq.index[-1].date().isoformat(),
+        "symbols":         list(all_sigs.keys()),
+    }
 
 if __name__ == "__main__":
     results = run_signal_backtest_all()

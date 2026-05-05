@@ -1655,6 +1655,11 @@ class TwStrategyApp(ctk.CTk):
         self._sbt_status = ctk.CTkLabel(bar, text="",
                                         font=(self.ui_font, 10), text_color=C_YELLOW)
         self._sbt_status.pack(side="right", padx=12)
+        ctk.CTkButton(bar, text="📊 組合回測", width=90, height=28,
+                      font=(self.ui_font, 10),
+                      fg_color="#2d4a6a", hover_color="#3a6090",
+                      command=self._sbt_portfolio_popup
+                      ).pack(side="right", padx=(0, 4))
         # 年度注資金額輸入
         ctk.CTkLabel(bar, text="每年注資 NT$",
                      font=(self.ui_font, 10), text_color=C_GRAY
@@ -2629,6 +2634,113 @@ class TwStrategyApp(ctk.CTk):
                 tk.Label(win, text="需安裝 matplotlib：pip install matplotlib",
                          fg="#f39c12", bg="#0f1a30",
                          font=(self.ui_font, 11)).pack(expand=True)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    # ── 組合回測 Popup ──────────────────────────────────────────────────────
+    def _sbt_portfolio_popup(self):
+        import tkinter as tk
+        from tw_backtest_signals import START_DATE, END_DATE
+        from tw_ui import CATEGORY
+
+        start = f"{self._sbt_start_var.get()}-01-01"
+        end   = f"{self._sbt_end_var.get()}-12-31"
+
+        win = tk.Toplevel(self)
+        win.title(f"📊 組合回測  {start[:4]}–{end[:4]}")
+        win.geometry("900x600")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        lbl = tk.Label(win, text="計算中…（需下載各股資料，約 30 秒）",
+                       fg="#a8e6cf", bg="#0f1a30", font=(self.ui_font, 12))
+        lbl.pack(expand=True)
+
+        cfg = _load_config()
+        symbols_cfg = [
+            {"symbol": s["symbol"], "name": s["name"]}
+            for s in cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
+            if not s.get("backtest_only", False)
+        ]
+
+        def _bg():
+            try:
+                from tw_backtest_signals import run_portfolio_backtest
+                r = run_portfolio_backtest(symbols_cfg, start_date=start, end_date=end)
+                self.after(0, lambda: _draw(r))
+            except Exception as e:
+                self.after(0, lambda: lbl.configure(text=f"錯誤：{e}", fg="#e74c3c"))
+
+        def _draw(r):
+            if "error" in r:
+                lbl.configure(text=f"⚠ {r['error']}", fg="#e74c3c")
+                return
+            lbl.destroy()
+
+            import matplotlib
+            matplotlib.use("TkAgg")
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mticker
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+            # 指標列
+            hdr = tk.Frame(win, bg="#0f1a30"); hdr.pack(fill="x", padx=12, pady=(8, 2))
+            metrics = [
+                ("初始資金",  f"NT${r['initial_capital']:,.0f}"),
+                ("終值",      f"NT${r['final_value']:,.0f}"),
+                ("總損益",    f"NT${r['total_pnl']:+,.0f}"),
+                ("CAGR",      f"{r['cagr_pct']:+.1f}%"),
+                ("MDD",       f"{r['mdd_pct']:.1f}%"),
+                ("Calmar",    f"{r['calmar']:.2f}"),
+                ("交易筆數",  f"{r['n_trades']}筆"),
+                ("勝率",      f"{r['win_rate']:.0f}%"),
+                ("手續費",    f"NT${r['total_fees']:,.0f}"),
+            ]
+            for label, val in metrics:
+                col = tk.Frame(hdr, bg="#0f1a30"); col.pack(side="left", padx=8)
+                tk.Label(col, text=label, fg="#95a5a6", bg="#0f1a30",
+                         font=(self.ui_font, 9)).pack()
+                color = "#2ecc71" if "+" in val or (val.replace(".","").replace("%","").lstrip("NT$").lstrip("+").lstrip("-").isdigit() and not val.startswith("-")) else "#e74c3c"
+                if label in ("MDD", "手續費"):
+                    color = "#e74c3c" if r['mdd_pct'] < -20 else "#f39c12"
+                tk.Label(col, text=val, fg="#74b9ff", bg="#0f1a30",
+                         font=(self.ui_font, 11, "bold")).pack()
+
+            # 圖表
+            eq  = r["equity_series"]
+            uw  = r["underwater"]
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 5),
+                                           gridspec_kw={"height_ratios": [3, 1]},
+                                           facecolor="#0f1a30")
+            fig.subplots_adjust(hspace=0.08, left=0.10, right=0.98, top=0.92, bottom=0.07)
+
+            ax1.plot(eq.index, eq / 1000, color="#74b9ff", linewidth=1.8)
+            ax1.fill_between(eq.index, eq / 1000, float(eq.iloc[0]) / 1000,
+                             alpha=0.15, color="#74b9ff")
+            ax1.axhline(y=r["initial_capital"] / 1000, color="#636e72",
+                        linewidth=0.8, linestyle="--", alpha=0.6)
+            ax1.set_facecolor("#0d1b2a")
+            ax1.set_title(f"組合回測資產曲線  {start[:4]}–{end[:4]}  "
+                          f"({len(r['symbols'])} 檔，初始 NT${r['initial_capital']//10000}萬)",
+                          color="#74b9ff", fontsize=10)
+            ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"NT${x:.0f}K"))
+            ax1.tick_params(colors="#95a5a6", labelsize=8, labelbottom=False)
+            ax1.grid(color="#1e3a5f", linewidth=0.4)
+            ax1.spines[:].set_color("#2a3a5a")
+
+            ax2.fill_between(uw.index, uw, 0, alpha=0.4, color="#e74c3c")
+            ax2.plot(uw.index, uw, color="#e74c3c", linewidth=0.7)
+            ax2.axhline(y=-10, color="#f39c12", linewidth=0.6, linestyle="--", alpha=0.7)
+            ax2.axhline(y=-20, color="#e74c3c", linewidth=0.6, linestyle="--", alpha=0.7)
+            ax2.set_facecolor("#0d1b2a")
+            ax2.set_ylabel("水下%", color="#95a5a6", fontsize=8)
+            ax2.tick_params(colors="#95a5a6", labelsize=8)
+            ax2.grid(color="#1e3a5f", linewidth=0.3)
+            ax2.spines[:].set_color("#2a3a5a")
+
+            canvas = FigureCanvasTkAgg(fig, master=win)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
 
         threading.Thread(target=_bg, daemon=True).start()
 

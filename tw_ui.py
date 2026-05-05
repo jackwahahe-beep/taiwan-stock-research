@@ -338,6 +338,16 @@ def _build_scan_rows(scan_records: list[dict], cfg: dict) -> list[dict]:
 class TwStrategyApp(ctk.CTk):
     def __init__(self):
         super().__init__()
+        # Suppress harmless "invalid command name" noise from CTk's DPI-scaling
+        # after-callbacks and from popup windows closed before their thread finishes.
+        _orig_rcb = self.report_callback_exception
+        def _filtered_rcb(exc, val, tb):
+            msg = str(val)
+            if "invalid command name" in msg:
+                return
+            _orig_rcb(exc, val, tb)
+        self.report_callback_exception = _filtered_rcb
+
         self.title("台股策略看盤")
         self.geometry("1440x820")
         self.minsize(1100, 620)
@@ -2734,9 +2744,15 @@ class TwStrategyApp(ctk.CTk):
                         start_date=start,
                         end_date=end,
                     )
-                    win.after(0, lambda: _draw(r, lbl, lot, sbuy_mult))
+                    try:
+                        win.after(0, lambda: _draw(r, lbl, lot, sbuy_mult) if win.winfo_exists() else None)
+                    except Exception:
+                        pass
                 except Exception as e:
-                    win.after(0, lambda: lbl.configure(text=f"Error: {e}", fg="#e74c3c"))
+                    try:
+                        win.after(0, lambda: lbl.configure(text=f"Error: {e}", fg="#e74c3c") if win.winfo_exists() else None)
+                    except Exception:
+                        pass
 
             threading.Thread(target=_bg, daemon=True).start()
 

@@ -728,13 +728,14 @@ def run_portfolio_backtest(
     symbols_cfg: list[dict],
     initial_capital: float = PORTFOLIO_INITIAL,
     lot_pct: float = PORTFOLIO_LOT_PCT,
+    sbuy_mult: float = 1.5,
     start_date: str = START_DATE,
     end_date: str = END_DATE,
 ) -> dict:
     """
     多股票共用資金池回測。
     - 無年度注資，一次性投入 initial_capital
-    - 每筆進場 = lot_pct × initial_capital；STRONG BUY 用 1.5 倍
+    - 每筆進場 = lot_pct × initial_capital；STRONG BUY 用 sbuy_mult 倍
     - 多個信號同日：STRONG BUY 優先，次按 RSI 由低到高（最超賣先進）
     - 隔日開盤執行 + SLIPPAGE 滑價
     """
@@ -823,7 +824,7 @@ def run_portfolio_backtest(
         candidates.sort(key=lambda x: (x[0], x[1]))
 
         for pri, _, sym, d in candidates:
-            spend = lot_size * (1.5 if pri == 0 else 1.0)
+            spend = lot_size * (sbuy_mult if pri == 0 else 1.0)
             if cash < spend * 0.5:
                 break
             ep     = d["exec_buy"]

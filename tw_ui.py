@@ -2651,26 +2651,102 @@ class TwStrategyApp(ctk.CTk):
         win.configure(bg="#0f1a30")
         win.lift()
 
-        lbl = tk.Label(win, text="Loading... (~30s)",
-                       fg="#a8e6cf", bg="#0f1a30", font=(self.ui_font, 12))
-        lbl.pack(expand=True)
-
         cfg = _load_config()
-        symbols_cfg = [
-            {"symbol": s["symbol"], "name": s["name"]}
-            for s in cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
-            if not s.get("backtest_only", False)
+        etf_syms  = [s for s in cfg["watchlist"]["etf"]     if not s.get("backtest_only")]
+        tech_syms = [s for s in cfg["watchlist"]["ai_tech"]  if not s.get("backtest_only")]
+        all_syms  = etf_syms + tech_syms
+
+        # ── 設定面板（首頁）──
+        sf = tk.Frame(win, bg="#0f1a30")
+        sf.pack(fill="both", expand=True, padx=30, pady=30)
+
+        tk.Label(sf, text="⚙  組合回測設定",
+                 fg="#74b9ff", bg="#0f1a30",
+                 font=(self.ui_font, 14, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 24))
+
+        def _row(r, label, widget_fn):
+            tk.Label(sf, text=label, fg="#dce8f0", bg="#0f1a30",
+                     font=(self.ui_font, 11), anchor="e", width=20
+                     ).grid(row=r, column=0, sticky="e", padx=(0, 14), pady=10)
+            w = widget_fn()
+            w.grid(row=r, column=1, sticky="w", pady=10)
+            return w
+
+        cap_var = tk.StringVar(value="1,200,000")
+        _row(1, "初始資金 (NT$):",
+             lambda: tk.Entry(sf, textvariable=cap_var, width=16,
+                              bg="#1a2a40", fg="#dce8f0", relief="flat",
+                              insertbackground="#dce8f0", font=(self.ui_font, 11)))
+
+        lot_var = tk.StringVar(value="10%")
+        _row(2, "每筆進場比例:",
+             lambda: _ttv.Combobox(sf, textvariable=lot_var, state="readonly",
+                                   values=["5%", "8%", "10%", "15%", "20%"], width=14,
+                                   font=(self.ui_font, 11)))
+
+        sbuy_var = tk.StringVar(value="1.5×")
+        _row(3, "STRONG BUY 倍率:",
+             lambda: _ttv.Combobox(sf, textvariable=sbuy_var, state="readonly",
+                                   values=["1.0×", "1.5×", "2.0×", "3.0×"], width=14,
+                                   font=(self.ui_font, 11)))
+
+        scope_choices = [
+            f"全部（{len(all_syms)} 檔）",
+            f"僅ETF（{len(etf_syms)} 檔）",
+            f"僅科技股（{len(tech_syms)} 檔）",
         ]
+        scope_var = tk.StringVar(value=scope_choices[0])
+        _row(4, "股票範圍:",
+             lambda: _ttv.Combobox(sf, textvariable=scope_var, state="readonly",
+                                   values=scope_choices, width=22,
+                                   font=(self.ui_font, 11)))
 
-        def _bg():
+        def _run():
             try:
-                from tw_backtest_signals import run_portfolio_backtest
-                r = run_portfolio_backtest(symbols_cfg, start_date=start, end_date=end)
-                self.after(0, lambda: _draw(r))
-            except Exception as e:
-                self.after(0, lambda: lbl.configure(text=f"Error: {e}", fg="#e74c3c"))
+                raw = cap_var.get().replace(",", "").replace("，", "")
+                initial = float(raw)
+            except ValueError:
+                initial = 1_200_000
+            lot       = float(lot_var.get().rstrip("%")) / 100
+            sbuy_mult = float(sbuy_var.get().rstrip("×"))
+            scope = scope_var.get()
+            if "僅ETF" in scope:
+                syms = etf_syms
+            elif "僅科技" in scope:
+                syms = tech_syms
+            else:
+                syms = all_syms
+            symbols_run = [{"symbol": s["symbol"], "name": s["name"]} for s in syms]
 
-        def _draw(r):
+            sf.destroy()
+            lbl = tk.Label(win, text="Loading... (~30s)",
+                           fg="#a8e6cf", bg="#0f1a30", font=(self.ui_font, 12))
+            lbl.pack(expand=True)
+
+            def _bg():
+                try:
+                    from tw_backtest_signals import run_portfolio_backtest
+                    r = run_portfolio_backtest(
+                        symbols_run,
+                        initial_capital=initial,
+                        lot_pct=lot,
+                        sbuy_mult=sbuy_mult,
+                        start_date=start,
+                        end_date=end,
+                    )
+                    win.after(0, lambda: _draw(r, lbl, lot, sbuy_mult))
+                except Exception as e:
+                    win.after(0, lambda: lbl.configure(text=f"Error: {e}", fg="#e74c3c"))
+
+            threading.Thread(target=_bg, daemon=True).start()
+
+        tk.Button(sf, text="  執行回測  ", bg="#2d4a6a", fg="#dce8f0",
+                  activebackground="#3a6090", activeforeground="white",
+                  font=(self.ui_font, 12, "bold"), relief="flat",
+                  padx=16, pady=8, cursor="hand2",
+                  command=_run).grid(row=5, column=0, columnspan=2, pady=28)
+
+        def _draw(r, lbl, lot_pct_used, sbuy_mult_used):
             if "error" in r:
                 lbl.configure(text=f"Error: {r['error']}", fg="#e74c3c")
                 return
@@ -2681,14 +2757,14 @@ class TwStrategyApp(ctk.CTk):
             import matplotlib.pyplot as plt
             import matplotlib.ticker as mticker
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            # 中文字型（Windows）
             plt.rcParams.update({"font.sans-serif": ["Microsoft JhengHei", "SimHei", "sans-serif"],
                                   "axes.unicode_minus": False})
 
             # ── 策略說明 ──
             strat_txt = (
                 f"策略：BUY + STRONG BUY 信號觸發進場，SELL 信號出場（ETF 永不賣出）｜"
-                f"隔日開盤執行 + 滑價 0.1%｜每筆 10% 資金，STRONG BUY 1.5x｜"
+                f"隔日開盤執行 + 滑價 0.1%｜"
+                f"每筆 {lot_pct_used*100:.0f}% 資金，STRONG BUY {sbuy_mult_used:.1f}x｜"
                 f"共 {len(r['symbols'])} 檔，初始 NT${r['initial_capital']:,.0f}"
             )
             tk.Label(win, text=strat_txt, fg="#74a0c0", bg="#0f1a30",
@@ -2804,8 +2880,6 @@ class TwStrategyApp(ctk.CTk):
                 ))
             tree.tag_configure("win",  foreground="#2ecc71")
             tree.tag_configure("lose", foreground="#e74c3c")
-
-        threading.Thread(target=_bg, daemon=True).start()
 
     def _sbt_walkforward_popup(self, sym: str, name: str, result: dict):
         import tkinter as tk

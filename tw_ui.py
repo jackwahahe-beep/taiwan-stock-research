@@ -2640,19 +2640,18 @@ class TwStrategyApp(ctk.CTk):
     # ── 組合回測 Popup ──────────────────────────────────────────────────────
     def _sbt_portfolio_popup(self):
         import tkinter as tk
-        from tw_backtest_signals import START_DATE, END_DATE
-        from tw_ui import CATEGORY
+        from tkinter import ttk as _ttv
 
         start = f"{self._sbt_start_var.get()}-01-01"
         end   = f"{self._sbt_end_var.get()}-12-31"
 
         win = tk.Toplevel(self)
-        win.title(f"📊 組合回測  {start[:4]}–{end[:4]}")
-        win.geometry("900x600")
+        win.title(f"Portfolio Backtest  {start[:4]}-{end[:4]}")
+        win.geometry("960x820")
         win.configure(bg="#0f1a30")
         win.lift()
 
-        lbl = tk.Label(win, text="計算中…（需下載各股資料，約 30 秒）",
+        lbl = tk.Label(win, text="Loading... (~30s)",
                        fg="#a8e6cf", bg="#0f1a30", font=(self.ui_font, 12))
         lbl.pack(expand=True)
 
@@ -2669,11 +2668,11 @@ class TwStrategyApp(ctk.CTk):
                 r = run_portfolio_backtest(symbols_cfg, start_date=start, end_date=end)
                 self.after(0, lambda: _draw(r))
             except Exception as e:
-                self.after(0, lambda: lbl.configure(text=f"錯誤：{e}", fg="#e74c3c"))
+                self.after(0, lambda: lbl.configure(text=f"Error: {e}", fg="#e74c3c"))
 
         def _draw(r):
             if "error" in r:
-                lbl.configure(text=f"⚠ {r['error']}", fg="#e74c3c")
+                lbl.configure(text=f"Error: {r['error']}", fg="#e74c3c")
                 return
             lbl.destroy()
 
@@ -2682,9 +2681,23 @@ class TwStrategyApp(ctk.CTk):
             import matplotlib.pyplot as plt
             import matplotlib.ticker as mticker
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            # 中文字型（Windows）
+            plt.rcParams.update({"font.sans-serif": ["Microsoft JhengHei", "SimHei", "sans-serif"],
+                                  "axes.unicode_minus": False})
 
-            # 指標列
-            hdr = tk.Frame(win, bg="#0f1a30"); hdr.pack(fill="x", padx=12, pady=(8, 2))
+            # ── 策略說明 ──
+            strat_txt = (
+                f"策略：BUY + STRONG BUY 信號觸發進場，SELL 信號出場（ETF 永不賣出）｜"
+                f"隔日開盤執行 + 滑價 0.1%｜每筆 10% 資金，STRONG BUY 1.5x｜"
+                f"共 {len(r['symbols'])} 檔，初始 NT${r['initial_capital']:,.0f}"
+            )
+            tk.Label(win, text=strat_txt, fg="#74a0c0", bg="#0f1a30",
+                     font=(self.ui_font, 9), wraplength=920, justify="left"
+                     ).pack(fill="x", padx=12, pady=(6, 0))
+
+            # ── 指標列 ──
+            hdr = tk.Frame(win, bg="#0f1a30")
+            hdr.pack(fill="x", padx=12, pady=(4, 2))
             metrics = [
                 ("初始資金",  f"NT${r['initial_capital']:,.0f}"),
                 ("終值",      f"NT${r['final_value']:,.0f}"),
@@ -2700,19 +2713,18 @@ class TwStrategyApp(ctk.CTk):
                 col = tk.Frame(hdr, bg="#0f1a30"); col.pack(side="left", padx=8)
                 tk.Label(col, text=label, fg="#95a5a6", bg="#0f1a30",
                          font=(self.ui_font, 9)).pack()
-                color = "#2ecc71" if "+" in val or (val.replace(".","").replace("%","").lstrip("NT$").lstrip("+").lstrip("-").isdigit() and not val.startswith("-")) else "#e74c3c"
-                if label in ("MDD", "手續費"):
-                    color = "#e74c3c" if r['mdd_pct'] < -20 else "#f39c12"
-                tk.Label(col, text=val, fg="#74b9ff", bg="#0f1a30",
+                vc = ("#2ecc71" if "+" in val else
+                      "#e74c3c" if "-" in val else "#74b9ff")
+                tk.Label(col, text=val, fg=vc, bg="#0f1a30",
                          font=(self.ui_font, 11, "bold")).pack()
 
-            # 圖表
-            eq  = r["equity_series"]
-            uw  = r["underwater"]
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 5),
+            # ── 圖表（資產曲線 + 水下曲線）──
+            eq = r["equity_series"]
+            uw = r["underwater"]
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 4),
                                            gridspec_kw={"height_ratios": [3, 1]},
                                            facecolor="#0f1a30")
-            fig.subplots_adjust(hspace=0.08, left=0.10, right=0.98, top=0.92, bottom=0.07)
+            fig.subplots_adjust(hspace=0.08, left=0.10, right=0.98, top=0.93, bottom=0.06)
 
             ax1.plot(eq.index, eq / 1000, color="#74b9ff", linewidth=1.8)
             ax1.fill_between(eq.index, eq / 1000, float(eq.iloc[0]) / 1000,
@@ -2720,8 +2732,7 @@ class TwStrategyApp(ctk.CTk):
             ax1.axhline(y=r["initial_capital"] / 1000, color="#636e72",
                         linewidth=0.8, linestyle="--", alpha=0.6)
             ax1.set_facecolor("#0d1b2a")
-            ax1.set_title(f"組合回測資產曲線  {start[:4]}–{end[:4]}  "
-                          f"({len(r['symbols'])} 檔，初始 NT${r['initial_capital']//10000}萬)",
+            ax1.set_title(f"Portfolio Equity Curve  {start[:4]}-{end[:4]}",
                           color="#74b9ff", fontsize=10)
             ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"NT${x:.0f}K"))
             ax1.tick_params(colors="#95a5a6", labelsize=8, labelbottom=False)
@@ -2733,14 +2744,66 @@ class TwStrategyApp(ctk.CTk):
             ax2.axhline(y=-10, color="#f39c12", linewidth=0.6, linestyle="--", alpha=0.7)
             ax2.axhline(y=-20, color="#e74c3c", linewidth=0.6, linestyle="--", alpha=0.7)
             ax2.set_facecolor("#0d1b2a")
-            ax2.set_ylabel("水下%", color="#95a5a6", fontsize=8)
+            ax2.set_ylabel("DD%", color="#95a5a6", fontsize=8)
             ax2.tick_params(colors="#95a5a6", labelsize=8)
             ax2.grid(color="#1e3a5f", linewidth=0.3)
             ax2.spines[:].set_color("#2a3a5a")
 
             canvas = FigureCanvasTkAgg(fig, master=win)
             canvas.draw()
-            canvas.get_tk_widget().pack(fill="both", expand=True)
+            canvas.get_tk_widget().pack(fill="x", padx=4)
+
+            # ── 交易明細 Treeview ──
+            tk.Label(win, text="交易明細（不含期末持倉）",
+                     fg="#74a0c0", bg="#0f1a30",
+                     font=(self.ui_font, 10, "bold")).pack(anchor="w", padx=14, pady=(6, 2))
+
+            tcols = [("代號",60),("名稱",80),("進場日",88),("進場價",70),
+                     ("出場日",88),("出場價",70),("股數",55),
+                     ("損益NT$",85),("損益%",60),("持有天",55),("出場方式",80)]
+            tf = tk.Frame(win, bg="#0f1a30"); tf.pack(fill="both", expand=True, padx=8, pady=(0,8))
+            style = _ttv.Style()
+            style.theme_use("default")
+            style.configure("Port.Treeview",
+                            background="#0d1b2a", foreground="#dce8f0",
+                            fieldbackground="#0d1b2a", rowheight=20,
+                            font=(self.ui_font, 10))
+            style.configure("Port.Treeview.Heading",
+                            background="#1a2a40", foreground="#74b9ff",
+                            font=(self.ui_font, 10, "bold"))
+            style.map("Port.Treeview", background=[("selected", "#2a4a70")])
+
+            tree = _ttv.Treeview(tf, style="Port.Treeview", show="headings",
+                                 columns=[c for c, _ in tcols], height=10)
+            for col, w in tcols:
+                tree.heading(col, text=col)
+                tree.column(col, width=w, anchor="center" if col not in ("名稱",) else "w",
+                            stretch=False)
+            sb = tk.Scrollbar(tf, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            tree.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+
+            closed = [t for t in r["trades"] if t.get("exit_signal") != "PERIOD_END"]
+            closed.sort(key=lambda t: t.get("entry_date", ""))
+            for t in closed:
+                pnl   = t.get("pnl", 0)
+                color = "win" if pnl > 0 else "lose"
+                tree.insert("", "end", tags=(color,), values=(
+                    t["symbol"].replace(".TW", ""),
+                    t.get("name", ""),
+                    t.get("entry_date", ""),
+                    f"{t.get('entry_price',0):,.1f}",
+                    t.get("exit_date", ""),
+                    f"{t.get('exit_price',0):,.1f}",
+                    f"{t.get('shares',0):,}",
+                    f"{pnl:+,.0f}",
+                    f"{t.get('pnl_pct',0):+.1f}%",
+                    t.get("hold_days", ""),
+                    t.get("exit_signal", ""),
+                ))
+            tree.tag_configure("win",  foreground="#2ecc71")
+            tree.tag_configure("lose", foreground="#e74c3c")
 
         threading.Thread(target=_bg, daemon=True).start()
 

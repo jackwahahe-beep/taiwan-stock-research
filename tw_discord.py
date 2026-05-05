@@ -393,6 +393,29 @@ def build_market_mode_embed(results: list[dict]) -> dict | None:
     except Exception:
         pass
 
+    # 三大法人動向摘要（監控股）
+    try:
+        inst_rows = []
+        for r in results:
+            total = r.get("inst_total")
+            if total is None:
+                continue
+            sym     = r["symbol"].replace(".TW", "").ljust(5)
+            foreign = r.get("inst_foreign") or 0
+            trust   = r.get("inst_trust")   or 0
+            sign    = "+" if total >= 0 else ""
+            inst_rows.append(
+                f"`{sym}` 外資`{foreign:+,}` 投信`{trust:+,}` 合計`{sign}{total:,}張`"
+            )
+        if inst_rows:
+            fields.append({
+                "name":  "🏦 三大法人動向（昨日，監控股）",
+                "value": "\n".join(inst_rows),
+                "inline": False,
+            })
+    except Exception:
+        pass
+
     return {
         "color":       color,
         "title":       f"📊 台股每日掃描｜{datetime.now(TZ).strftime('%Y-%m-%d')}",

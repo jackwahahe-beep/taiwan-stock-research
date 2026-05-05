@@ -2688,14 +2688,20 @@ class TwStrategyApp(ctk.CTk):
                               bg="#1a2a40", fg="#dce8f0", relief="flat",
                               insertbackground="#dce8f0", font=(self.ui_font, 11)))
 
-        lot_var = tk.StringVar(value="20%")
-        _row(2, "每筆比例（佔年注資）:",
-             lambda: _ttv.Combobox(sf, textvariable=lot_var, state="readonly",
-                                   values=["10%", "15%", "20%", "30%", "50%"], width=14,
+        lot_bull_var = tk.StringVar(value="15%")
+        _row(2, "牛市每筆比例:",
+             lambda: _ttv.Combobox(sf, textvariable=lot_bull_var, state="readonly",
+                                   values=["10%", "15%", "20%", "25%", "30%"], width=14,
+                                   font=(self.ui_font, 11)))
+
+        lot_bear_var = tk.StringVar(value="30%")
+        _row(3, "熊市每筆比例（加碼）:",
+             lambda: _ttv.Combobox(sf, textvariable=lot_bear_var, state="readonly",
+                                   values=["15%", "20%", "30%", "40%", "50%"], width=14,
                                    font=(self.ui_font, 11)))
 
         sbuy_var = tk.StringVar(value="1.5×")
-        _row(3, "STRONG BUY 倍率:",
+        _row(4, "STRONG BUY 倍率:",
              lambda: _ttv.Combobox(sf, textvariable=sbuy_var, state="readonly",
                                    values=["1.0×", "1.5×", "2.0×", "3.0×"], width=14,
                                    font=(self.ui_font, 11)))
@@ -2706,7 +2712,7 @@ class TwStrategyApp(ctk.CTk):
             f"僅科技股（{len(tech_syms)} 檔）",
         ]
         scope_var = tk.StringVar(value=scope_choices[0])
-        _row(4, "股票範圍:",
+        _row(5, "股票範圍:",
              lambda: _ttv.Combobox(sf, textvariable=scope_var, state="readonly",
                                    values=scope_choices, width=22,
                                    font=(self.ui_font, 11)))
@@ -2716,7 +2722,8 @@ class TwStrategyApp(ctk.CTk):
                 annual = float(inj_var.get().replace(",", "").replace("，", ""))
             except ValueError:
                 annual = 100_000
-            lot       = float(lot_var.get().rstrip("%")) / 100
+            lot_bull  = float(lot_bull_var.get().rstrip("%")) / 100
+            lot_bear  = float(lot_bear_var.get().rstrip("%")) / 100
             sbuy_mult = float(sbuy_var.get().rstrip("×"))
             scope = scope_var.get()
             if "僅ETF" in scope:
@@ -2738,13 +2745,14 @@ class TwStrategyApp(ctk.CTk):
                     r = run_portfolio_backtest(
                         symbols_run,
                         annual_injection=annual,
-                        lot_pct=lot,
+                        lot_pct_bull=lot_bull,
+                        lot_pct_bear=lot_bear,
                         sbuy_mult=sbuy_mult,
                         start_date=start,
                         end_date=end,
                     )
                     try:
-                        win.after(0, lambda: _draw(r, lbl, annual, lot, sbuy_mult) if win.winfo_exists() else None)
+                        win.after(0, lambda: _draw(r, lbl, annual, lot_bull, lot_bear, sbuy_mult) if win.winfo_exists() else None)
                     except Exception:
                         pass
                 except Exception as e:
@@ -2759,9 +2767,9 @@ class TwStrategyApp(ctk.CTk):
                   activebackground="#3a6090", activeforeground="white",
                   font=(self.ui_font, 12, "bold"), relief="flat",
                   padx=16, pady=8, cursor="hand2",
-                  command=_run).grid(row=5, column=0, columnspan=2, pady=28)
+                  command=_run).grid(row=6, column=0, columnspan=2, pady=28)
 
-        def _draw(r, lbl, annual_inj, lot_pct_used, sbuy_mult_used):
+        def _draw(r, lbl, annual_inj, lot_bull, lot_bear, sbuy_mult_used):
             if "error" in r:
                 lbl.configure(text=f"Error: {r['error']}", fg="#e74c3c")
                 return
@@ -2776,12 +2784,12 @@ class TwStrategyApp(ctk.CTk):
                                   "axes.unicode_minus": False})
 
             # ── 策略說明 ──
-            lot_amt = annual_inj * lot_pct_used
             strat_txt = (
                 f"策略：每年注資 NT${annual_inj:,.0f}，BUY/STRONG BUY 信號觸發進場，"
                 f"SELL 信號出場（ETF 永不賣出）｜"
                 f"隔日開盤執行 + 滑價 0.1%｜"
-                f"每筆 NT${lot_amt:,.0f}（年注資 {lot_pct_used*100:.0f}%），"
+                f"牛市每筆 {lot_bull*100:.0f}%（NT${annual_inj*lot_bull:,.0f}），"
+                f"熊市 {lot_bear*100:.0f}%（NT${annual_inj*lot_bear:,.0f}），"
                 f"STRONG BUY {sbuy_mult_used:.1f}x｜共 {len(r['symbols'])} 檔"
             )
             tk.Label(win, text=strat_txt, fg="#74a0c0", bg="#0f1a30",

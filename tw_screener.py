@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 import yaml
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -58,6 +58,71 @@ SECTOR = {
 
 # 市場模式乘數：風險期只推 STRONG BUY，警戒期忽略普通 BUY
 MARKET_MULTIPLIER = {"NORMAL": 1.0, "WARN": 0.7, "RISK": 0.4}
+
+# ── 三大法人籌碼（TWSE T86）─────────────────────────────────────────────────────
+
+_INST_CACHE: dict = {}
+
+def fetch_institutional_flow(date_str: str | None = None) -> dict:
+    """從 TWSE T86 API 抓取三大法人買賣超。
+    回傳 {symbol: {foreign, trust, dealer, total}}（單位：張=1000股）"""
+    import requests as _req
+    import holidays as _holidays
+    global _INST_CACHE
+
+    today = datetime.now(TZ).date()
+    if date_str:
+        dates_to_try = [date_str]
+    else:
+        tw_hols = _holidays.TW(years=today.year)
+        dates_to_try = []
+        d = today
+        for _ in range(5):
+            if d.weekday() < 5 and d not in tw_hols:
+                dates_to_try.append(d.strftime("%Y%m%d"))
+            d -= timedelta(days=1)
+
+    cache_key = dates_to_try[0] if dates_to_try else "none"
+    if _INST_CACHE.get("date") == cache_key:
+        return _INST_CACHE["data"]
+
+    def _parse(s: str) -> int:
+        try:
+            return int(s.replace(",", "").replace(" ", "") or "0")
+        except ValueError:
+            return 0
+
+    for dt in dates_to_try:
+        url = (f"https://www.twse.com.tw/rwd/zh/fund/T86"
+               f"?response=json&date={dt}&selectType=ALL")
+        try:
+            resp = _req.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            data = resp.json()
+            if data.get("stat") != "OK":
+                continue
+            result = {}
+            for row in data.get("data", []):
+                try:
+                    sym     = row[0].strip() + ".TW"
+                    # 欄位索引（共19欄）：
+                    # [4]=外陸資買賣超, [10]=投信買賣超, [11]=自營商買賣超, [18]=三大法人合計
+                    foreign = round(_parse(row[4])  / 1000)
+                    trust   = round(_parse(row[10]) / 1000)
+                    dealer  = round(_parse(row[11]) / 1000)
+                    total   = round(_parse(row[18]) / 1000)
+                    result[sym] = {"foreign": foreign, "trust": trust,
+                                   "dealer": dealer, "total": total}
+                except (ValueError, IndexError):
+                    continue
+            _INST_CACHE = {"date": cache_key, "data": result}
+            print(f"[法人籌碼] {dt} 共 {len(result)} 檔")
+            return result
+        except Exception as e:
+            print(f"[法人籌碼] {dt} 失敗: {e}")
+            continue
+
+    print("[法人籌碼] 無可用資料")
+    return {}
 
 
 def load_config() -> dict:
@@ -339,6 +404,7 @@ def run_scan() -> list[dict]:
     print(f"\n市場模式：{mode_label}（大盤 {market_detail.get('twii_vs_ma200_pct', 'N/A')}% vs MA200，波動率 {market_detail.get('vol_20_annualized', 'N/A')}%）")
 
     results     = []
+    inst_flow   = fetch_institutional_flow()  # 三大法人（一次抓取，複用）
     all_stocks  = [s for s in cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
                    if not s.get("backtest_only", False)]
 
@@ -369,11 +435,16 @@ def run_scan() -> list[dict]:
             sig["signals"] = filtered_signals
             sig["market_mode"] = market_mode
 
+            inst  = inst_flow.get(symbol, {})
             entry = {
                 "symbol": symbol,
                 "name":   name,
                 "date":   date.today().isoformat(),
                 **sig,
+                "inst_foreign": inst.get("foreign"),
+                "inst_trust":   inst.get("trust"),
+                "inst_dealer":  inst.get("dealer"),
+                "inst_total":   inst.get("total"),
             }
             results.append(entry)
 

@@ -174,6 +174,18 @@ def build_buy_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
     if dca_line:
         fields.append({"name": "📈 10年DCA建議策略", "value": dca_line, "inline": False})
 
+    # 三大法人動向
+    inst_total   = stock.get("inst_total")
+    inst_foreign = stock.get("inst_foreign")
+    inst_trust   = stock.get("inst_trust")
+    inst_dealer  = stock.get("inst_dealer")
+    if inst_total is not None:
+        def _fmt(v):
+            return f"`{v:+,}張`" if v else "`0張`"
+        inst_val = (f"外資 {_fmt(inst_foreign)}  投信 {_fmt(inst_trust)}"
+                    f"  自營 {_fmt(inst_dealer)}\n合計 **{_fmt(inst_total)}**")
+        fields.append({"name": "🏦 三大法人動向（昨日）", "value": inst_val, "inline": False})
+
     if watch_reasons:
         fields.append({"name": "⚠️ 附加注意",
                         "value": "\n".join(f"• {r}" for r in watch_reasons),
@@ -247,6 +259,18 @@ def build_sell_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
     dca_line = _dca_context_line(sym, dca_cache or {})
     if dca_line:
         fields.append({"name": "📈 10年DCA建議策略", "value": dca_line, "inline": False})
+
+    # 三大法人動向
+    inst_total   = stock.get("inst_total")
+    inst_foreign = stock.get("inst_foreign")
+    inst_trust   = stock.get("inst_trust")
+    inst_dealer  = stock.get("inst_dealer")
+    if inst_total is not None:
+        def _fmt(v):
+            return f"`{v:+,}張`" if v else "`0張`"
+        inst_val = (f"外資 {_fmt(inst_foreign)}  投信 {_fmt(inst_trust)}"
+                    f"  自營 {_fmt(inst_dealer)}\n合計 **{_fmt(inst_total)}**")
+        fields.append({"name": "🏦 三大法人動向（昨日）", "value": inst_val, "inline": False})
 
     return {
         "color":  COLOR["SELL"],

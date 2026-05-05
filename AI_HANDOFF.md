@@ -8,6 +8,17 @@
 
 ## Session 13 — 完成事項
 
+### B：法人籌碼整合（完成）
+- **tw_screener.py**：新增 `fetch_institutional_flow()` 函數
+  - 從 TWSE T86 API（`/rwd/zh/fund/T86`）抓取三大法人每日買賣超
+  - 欄位索引：row[4]=外陸資淨買超, row[10]=投信, row[11]=自營商, row[18]=三大合計
+  - 單位：張（1張=1000股）；每日快取於 `_INST_CACHE`，避免重複請求
+  - 若今日資料未出，自動回退至最近一個有資料的交易日（最多往回5天）
+  - `run_scan()` 中一次抓取，附加至每個 entry：`inst_foreign / inst_trust / inst_dealer / inst_total`
+- **tw_discord.py**：`build_buy_embed()` + `build_sell_embed()` 各加 "🏦 三大法人動向（昨日）" field
+  - 格式：`外資 +X,XXX張  投信 +XXX張  自營 +XXX張  \n合計 **+X,XXX張**`
+  - 無資料時靜默不顯示（inst_total is None）
+
 ### A1：信號準確度補評工具（tw_scheduler.py）
 - 新增 `backfill_outcomes()` 函數：掃描所有 `cache/scan_*.json`，對距今 ≥ 5 交易日的日期自動補評
 - 新增 `--backfill` 參數：`python tw_scheduler.py --backfill`

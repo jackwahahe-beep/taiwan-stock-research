@@ -726,16 +726,16 @@ def build_signal_backtest_embed(result: dict) -> dict:
 
 def run_portfolio_backtest(
     symbols_cfg: list[dict],
-    initial_capital: float = PORTFOLIO_INITIAL,
-    lot_pct: float = PORTFOLIO_LOT_PCT,
+    annual_injection: float = 100_000,
+    lot_pct: float = 0.20,
     sbuy_mult: float = 1.5,
     start_date: str = START_DATE,
     end_date: str = END_DATE,
 ) -> dict:
     """
-    多股票共用資金池回測。
-    - 無年度注資，一次性投入 initial_capital
-    - 每筆進場 = lot_pct × initial_capital；STRONG BUY 用 sbuy_mult 倍
+    多股票共用資金池回測（年度注資 DCA 版）。
+    - 每年第一個交易日注入 annual_injection 到現金池
+    - 每筆進場 = lot_pct × annual_injection；STRONG BUY 用 sbuy_mult 倍
     - 多個信號同日：STRONG BUY 優先，次按 RSI 由低到高（最超賣先進）
     - 隔日開盤執行 + SLIPPAGE 滑價
     """
@@ -760,13 +760,20 @@ def run_portfolio_backtest(
     all_dates = sorted(set().union(*[s.index for s in all_sigs.values()]))
 
     # 3. 模擬
-    cash       = float(initial_capital)
+    cash         = 0.0
+    n_injections = 0
+    inj_year     = None
     positions: dict[str, dict] = {}   # {sym: {shares, cost, entry_price, entry_date, buy_fee, entry_signal}}
     trades:    list[dict] = []
     equity_ts: dict = {}
-    lot_size   = initial_capital * lot_pct
+    lot_size   = annual_injection * lot_pct
 
     for dt in all_dates:
+        # 每年第一個交易日注資
+        if dt.year != inj_year:
+            inj_year = dt.year
+            cash += annual_injection
+            n_injections += 1
         # 收集當日各股狀態
         day: dict[str, dict] = {}
         for sym, sig in all_sigs.items():
@@ -874,36 +881,38 @@ def run_portfolio_backtest(
     if eq.empty:
         return {"error": "無交易資料"}
 
-    years       = max(1.0, (eq.index[-1] - eq.index[0]).days / 365.25)
-    final_val   = float(eq.iloc[-1])
-    cagr        = ((final_val / initial_capital) ** (1 / years) - 1) * 100
-    underwater  = (eq / eq.cummax() - 1) * 100
-    mdd         = float(underwater.min())
-    calmar      = round(-cagr / mdd, 2) if mdd < 0 else 0.0
-    closed      = [t for t in trades if t["exit_signal"] != "PERIOD_END"]
-    n_wins      = sum(1 for t in closed if t.get("pnl", 0) > 0)
-    total_fees  = sum(t.get("fees", 0) for t in trades)
+    total_injected = annual_injection * n_injections
+    years          = max(1.0, (eq.index[-1] - eq.index[0]).days / 365.25)
+    final_val      = float(eq.iloc[-1])
+    cagr           = ((final_val / total_injected) ** (1 / years) - 1) * 100 if total_injected > 0 else 0.0
+    underwater     = (eq / eq.cummax() - 1) * 100
+    mdd            = float(underwater.min())
+    calmar         = round(-cagr / mdd, 2) if mdd < 0 else 0.0
+    closed         = [t for t in trades if t["exit_signal"] != "PERIOD_END"]
+    n_wins         = sum(1 for t in closed if t.get("pnl", 0) > 0)
+    total_fees     = sum(t.get("fees", 0) for t in trades)
 
-    print(f"[組合回測] {len(all_sigs)}檔  初始 NT${initial_capital:,.0f}"
+    print(f"[組合回測] {len(all_sigs)}檔  年注 NT${annual_injection:,.0f}×{n_injections}年"
           f"  → NT${final_val:,.0f}  CAGR {cagr:+.1f}%  MDD {mdd:.1f}%  Calmar {calmar:.2f}")
 
     return {
-        "initial_capital": initial_capital,
-        "final_value":     round(final_val, 0),
-        "total_pnl":       round(final_val - initial_capital, 0),
-        "cagr_pct":        round(cagr, 1),
-        "mdd_pct":         round(mdd, 1),
-        "calmar":          calmar,
-        "n_trades":        len(closed),
-        "n_wins":          n_wins,
-        "win_rate":        round(n_wins / len(closed) * 100, 1) if closed else 0.0,
-        "total_fees":      round(total_fees, 0),
-        "equity_series":   eq,
-        "underwater":      underwater,
-        "trades":          trades,
-        "start_date":      eq.index[0].date().isoformat(),
-        "end_date":        eq.index[-1].date().isoformat(),
-        "symbols":         list(all_sigs.keys()),
+        "annual_injection": annual_injection,
+        "total_injected":   round(total_injected, 0),
+        "final_value":      round(final_val, 0),
+        "total_pnl":        round(final_val - total_injected, 0),
+        "cagr_pct":         round(cagr, 1),
+        "mdd_pct":          round(mdd, 1),
+        "calmar":           calmar,
+        "n_trades":         len(closed),
+        "n_wins":           n_wins,
+        "win_rate":         round(n_wins / len(closed) * 100, 1) if closed else 0.0,
+        "total_fees":       round(total_fees, 0),
+        "equity_series":    eq,
+        "underwater":       underwater,
+        "trades":           trades,
+        "start_date":       eq.index[0].date().isoformat(),
+        "end_date":         eq.index[-1].date().isoformat(),
+        "symbols":          list(all_sigs.keys()),
     }
 
 if __name__ == "__main__":

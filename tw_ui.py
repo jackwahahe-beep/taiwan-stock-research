@@ -2682,16 +2682,16 @@ class TwStrategyApp(ctk.CTk):
             w.grid(row=r, column=1, sticky="w", pady=10)
             return w
 
-        cap_var = tk.StringVar(value="1,200,000")
-        _row(1, "初始資金 (NT$):",
-             lambda: tk.Entry(sf, textvariable=cap_var, width=16,
+        inj_var = tk.StringVar(value="100,000")
+        _row(1, "每年注資 (NT$):",
+             lambda: tk.Entry(sf, textvariable=inj_var, width=16,
                               bg="#1a2a40", fg="#dce8f0", relief="flat",
                               insertbackground="#dce8f0", font=(self.ui_font, 11)))
 
-        lot_var = tk.StringVar(value="10%")
-        _row(2, "每筆進場比例:",
+        lot_var = tk.StringVar(value="20%")
+        _row(2, "每筆比例（佔年注資）:",
              lambda: _ttv.Combobox(sf, textvariable=lot_var, state="readonly",
-                                   values=["5%", "8%", "10%", "15%", "20%"], width=14,
+                                   values=["10%", "15%", "20%", "30%", "50%"], width=14,
                                    font=(self.ui_font, 11)))
 
         sbuy_var = tk.StringVar(value="1.5×")
@@ -2713,10 +2713,9 @@ class TwStrategyApp(ctk.CTk):
 
         def _run():
             try:
-                raw = cap_var.get().replace(",", "").replace("，", "")
-                initial = float(raw)
+                annual = float(inj_var.get().replace(",", "").replace("，", ""))
             except ValueError:
-                initial = 1_200_000
+                annual = 100_000
             lot       = float(lot_var.get().rstrip("%")) / 100
             sbuy_mult = float(sbuy_var.get().rstrip("×"))
             scope = scope_var.get()
@@ -2738,14 +2737,14 @@ class TwStrategyApp(ctk.CTk):
                     from tw_backtest_signals import run_portfolio_backtest
                     r = run_portfolio_backtest(
                         symbols_run,
-                        initial_capital=initial,
+                        annual_injection=annual,
                         lot_pct=lot,
                         sbuy_mult=sbuy_mult,
                         start_date=start,
                         end_date=end,
                     )
                     try:
-                        win.after(0, lambda: _draw(r, lbl, lot, sbuy_mult) if win.winfo_exists() else None)
+                        win.after(0, lambda: _draw(r, lbl, annual, lot, sbuy_mult) if win.winfo_exists() else None)
                     except Exception:
                         pass
                 except Exception as e:
@@ -2762,7 +2761,7 @@ class TwStrategyApp(ctk.CTk):
                   padx=16, pady=8, cursor="hand2",
                   command=_run).grid(row=5, column=0, columnspan=2, pady=28)
 
-        def _draw(r, lbl, lot_pct_used, sbuy_mult_used):
+        def _draw(r, lbl, annual_inj, lot_pct_used, sbuy_mult_used):
             if "error" in r:
                 lbl.configure(text=f"Error: {r['error']}", fg="#e74c3c")
                 return
@@ -2777,11 +2776,13 @@ class TwStrategyApp(ctk.CTk):
                                   "axes.unicode_minus": False})
 
             # ── 策略說明 ──
+            lot_amt = annual_inj * lot_pct_used
             strat_txt = (
-                f"策略：BUY + STRONG BUY 信號觸發進場，SELL 信號出場（ETF 永不賣出）｜"
+                f"策略：每年注資 NT${annual_inj:,.0f}，BUY/STRONG BUY 信號觸發進場，"
+                f"SELL 信號出場（ETF 永不賣出）｜"
                 f"隔日開盤執行 + 滑價 0.1%｜"
-                f"每筆 {lot_pct_used*100:.0f}% 資金，STRONG BUY {sbuy_mult_used:.1f}x｜"
-                f"共 {len(r['symbols'])} 檔，初始 NT${r['initial_capital']:,.0f}"
+                f"每筆 NT${lot_amt:,.0f}（年注資 {lot_pct_used*100:.0f}%），"
+                f"STRONG BUY {sbuy_mult_used:.1f}x｜共 {len(r['symbols'])} 檔"
             )
             tk.Label(win, text=strat_txt, fg="#74a0c0", bg="#0f1a30",
                      font=(self.ui_font, 9), wraplength=920, justify="left"
@@ -2791,7 +2792,8 @@ class TwStrategyApp(ctk.CTk):
             hdr = tk.Frame(win, bg="#0f1a30")
             hdr.pack(fill="x", padx=12, pady=(4, 2))
             metrics = [
-                ("初始資金",  f"NT${r['initial_capital']:,.0f}"),
+                ("每年注資",  f"NT${r['annual_injection']:,.0f}"),
+                ("總注入",    f"NT${r['total_injected']:,.0f}"),
                 ("終值",      f"NT${r['final_value']:,.0f}"),
                 ("總損益",    f"NT${r['total_pnl']:+,.0f}"),
                 ("CAGR",      f"{r['cagr_pct']:+.1f}%"),
@@ -2799,7 +2801,6 @@ class TwStrategyApp(ctk.CTk):
                 ("Calmar",    f"{r['calmar']:.2f}"),
                 ("交易筆數",  f"{r['n_trades']}筆"),
                 ("勝率",      f"{r['win_rate']:.0f}%"),
-                ("手續費",    f"NT${r['total_fees']:,.0f}"),
             ]
             for label, val in metrics:
                 col = tk.Frame(hdr, bg="#0f1a30"); col.pack(side="left", padx=8)
@@ -2821,7 +2822,7 @@ class TwStrategyApp(ctk.CTk):
             ax1.plot(eq.index, eq / 1000, color="#74b9ff", linewidth=1.8)
             ax1.fill_between(eq.index, eq / 1000, float(eq.iloc[0]) / 1000,
                              alpha=0.15, color="#74b9ff")
-            ax1.axhline(y=r["initial_capital"] / 1000, color="#636e72",
+            ax1.axhline(y=r["total_injected"] / 1000, color="#636e72",
                         linewidth=0.8, linestyle="--", alpha=0.6)
             ax1.set_facecolor("#0d1b2a")
             ax1.set_title(f"Portfolio Equity Curve  {start[:4]}-{end[:4]}",

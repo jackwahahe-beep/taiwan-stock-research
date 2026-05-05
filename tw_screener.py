@@ -61,68 +61,133 @@ MARKET_MULTIPLIER = {"NORMAL": 1.0, "WARN": 0.7, "RISK": 0.4}
 
 # ── 三大法人籌碼（TWSE T86）─────────────────────────────────────────────────────
 
-_INST_CACHE: dict = {}
+_INST_CACHE: dict = {}  # {YYYYMMDD: {symbol: {foreign, trust, dealer, total}}}
+
+
+def _parse_inst(s: str) -> int:
+    try:
+        return int(s.replace(",", "").replace(" ", "") or "0")
+    except ValueError:
+        return 0
+
+
+def _fetch_inst_one_day(date_str: str) -> dict:
+    """抓取單一日期的三大法人資料，結果存入 _INST_CACHE[date_str]。
+    回傳 {symbol: {foreign, trust, dealer, total}} 或 {}（無資料）"""
+    import requests as _req
+    global _INST_CACHE
+    if date_str in _INST_CACHE:
+        return _INST_CACHE[date_str]
+    url = (f"https://www.twse.com.tw/rwd/zh/fund/T86"
+           f"?response=json&date={date_str}&selectType=ALL")
+    try:
+        resp = _req.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        data = resp.json()
+        if data.get("stat") != "OK":
+            return {}
+        result = {}
+        for row in data.get("data", []):
+            try:
+                sym     = row[0].strip() + ".TW"
+                foreign = round(_parse_inst(row[4])  / 1000)
+                trust   = round(_parse_inst(row[10]) / 1000)
+                dealer  = round(_parse_inst(row[11]) / 1000)
+                total   = round(_parse_inst(row[18]) / 1000)
+                result[sym] = {"foreign": foreign, "trust": trust,
+                               "dealer": dealer, "total": total}
+            except (ValueError, IndexError):
+                continue
+        _INST_CACHE[date_str] = result
+        return result
+    except Exception as e:
+        print(f"[法人籌碼] {date_str} 失敗: {e}")
+        return {}
+
+
+def _recent_trading_days(n: int, from_date=None) -> list[str]:
+    """回傳最近 n 個台灣交易日（YYYYMMDD），最新的排在前面。"""
+    import holidays as _holidays
+    d = from_date or datetime.now(TZ).date()
+    tw_hols = _holidays.TW(years=d.year)
+    days = []
+    for _ in range(n * 5):
+        if d.weekday() < 5 and d not in tw_hols:
+            days.append(d.strftime("%Y%m%d"))
+        d -= timedelta(days=1)
+        if len(days) >= n:
+            break
+    return days
+
 
 def fetch_institutional_flow(date_str: str | None = None) -> dict:
-    """從 TWSE T86 API 抓取三大法人買賣超。
-    回傳 {symbol: {foreign, trust, dealer, total}}（單位：張=1000股）"""
-    import requests as _req
-    import holidays as _holidays
-    global _INST_CACHE
-
-    today = datetime.now(TZ).date()
-    if date_str:
-        dates_to_try = [date_str]
-    else:
-        tw_hols = _holidays.TW(years=today.year)
-        dates_to_try = []
-        d = today
-        for _ in range(5):
-            if d.weekday() < 5 and d not in tw_hols:
-                dates_to_try.append(d.strftime("%Y%m%d"))
-            d -= timedelta(days=1)
-
-    cache_key = dates_to_try[0] if dates_to_try else "none"
-    if _INST_CACHE.get("date") == cache_key:
-        return _INST_CACHE["data"]
-
-    def _parse(s: str) -> int:
-        try:
-            return int(s.replace(",", "").replace(" ", "") or "0")
-        except ValueError:
-            return 0
-
-    for dt in dates_to_try:
-        url = (f"https://www.twse.com.tw/rwd/zh/fund/T86"
-               f"?response=json&date={dt}&selectType=ALL")
-        try:
-            resp = _req.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            data = resp.json()
-            if data.get("stat") != "OK":
-                continue
-            result = {}
-            for row in data.get("data", []):
-                try:
-                    sym     = row[0].strip() + ".TW"
-                    # 欄位索引（共19欄）：
-                    # [4]=外陸資買賣超, [10]=投信買賣超, [11]=自營商買賣超, [18]=三大法人合計
-                    foreign = round(_parse(row[4])  / 1000)
-                    trust   = round(_parse(row[10]) / 1000)
-                    dealer  = round(_parse(row[11]) / 1000)
-                    total   = round(_parse(row[18]) / 1000)
-                    result[sym] = {"foreign": foreign, "trust": trust,
-                                   "dealer": dealer, "total": total}
-                except (ValueError, IndexError):
-                    continue
-            _INST_CACHE = {"date": cache_key, "data": result}
-            print(f"[法人籌碼] {dt} 共 {len(result)} 檔")
-            return result
-        except Exception as e:
-            print(f"[法人籌碼] {dt} 失敗: {e}")
-            continue
-
+    """回傳最近一個有資料的交易日的三大法人買賣超（供每日掃描顯示用）。"""
+    candidates = [date_str] if date_str else _recent_trading_days(5)
+    for dt in candidates:
+        data = _fetch_inst_one_day(dt)
+        if data:
+            print(f"[法人籌碼] {dt} 共 {len(data)} 檔")
+            return data
     print("[法人籌碼] 無可用資料")
     return {}
+
+
+def fetch_inst_trend_all(days: int = 3) -> dict[str, dict]:
+    """取最近 days 個交易日的法人趨勢，回傳 {symbol: trend_dict}。
+    trend_dict 鍵：
+      consecutive_sell  — 外資連續淨賣天數（最新起算）
+      consecutive_buy   — 外資連續淨買天數
+      both_buy_days     — 外資+投信同向淨買的天數（days 內）
+      days_ok           — 成功取得資料的天數
+    """
+    trading_days = _recent_trading_days(days)
+    day_datasets = []
+    for dt in trading_days:
+        d = _fetch_inst_one_day(dt)
+        if d:
+            day_datasets.append(d)
+    if not day_datasets:
+        return {}
+
+    # 收集所有出現的 symbol
+    all_syms: set[str] = set()
+    for ds in day_datasets:
+        all_syms.update(ds.keys())
+
+    trends: dict[str, dict] = {}
+    for sym in all_syms:
+        foreign_seq = [ds[sym]["foreign"] for ds in day_datasets if sym in ds]
+        trust_seq   = [ds[sym]["trust"]   for ds in day_datasets if sym in ds]
+        if not foreign_seq:
+            continue
+
+        # 連續淨賣（最新起算）
+        cons_sell = 0
+        for v in foreign_seq:
+            if v < 0:
+                cons_sell += 1
+            else:
+                break
+
+        # 連續淨買
+        cons_buy = 0
+        for v in foreign_seq:
+            if v > 0:
+                cons_buy += 1
+            else:
+                break
+
+        # 外資+投信同向淨買天數
+        both_buy = sum(
+            1 for f, t in zip(foreign_seq, trust_seq) if f > 0 and t > 0
+        )
+
+        trends[sym] = {
+            "consecutive_sell": cons_sell,
+            "consecutive_buy":  cons_buy,
+            "both_buy_days":    both_buy,
+            "days_ok":          len(foreign_seq),
+        }
+    return trends
 
 
 def load_config() -> dict:
@@ -404,7 +469,8 @@ def run_scan() -> list[dict]:
     print(f"\n市場模式：{mode_label}（大盤 {market_detail.get('twii_vs_ma200_pct', 'N/A')}% vs MA200，波動率 {market_detail.get('vol_20_annualized', 'N/A')}%）")
 
     results     = []
-    inst_flow   = fetch_institutional_flow()  # 三大法人（一次抓取，複用）
+    inst_flow   = fetch_institutional_flow()           # 昨日資料（顯示用）
+    inst_trends = fetch_inst_trend_all(days=3)         # 近3日趨勢（信號調整用）
     all_stocks  = [s for s in cfg["watchlist"]["etf"] + cfg["watchlist"]["ai_tech"]
                    if not s.get("backtest_only", False)]
 
@@ -434,6 +500,30 @@ def run_scan() -> list[dict]:
                 filtered_signals.append(s)
             sig["signals"] = filtered_signals
             sig["market_mode"] = market_mode
+
+            # ── 法人趨勢調整信號 ──────────────────────────────────────────────
+            trend = inst_trends.get(symbol, {})
+            cons_sell = trend.get("consecutive_sell", 0)
+            both_buy  = trend.get("both_buy_days", 0)
+            days_ok   = trend.get("days_ok", 0)
+
+            if days_ok >= 2:
+                # 外資連續 3 日淨賣 → BUY 降級為 WATCH
+                if cons_sell >= 3:
+                    sig["signals"] = [
+                        {**s, "type": "WATCH",
+                         "reason": f"[法人反向降級] 外資連續{cons_sell}日淨賣　{s['reason']}"}
+                        if s["type"] == "BUY" else s
+                        for s in sig["signals"]
+                    ]
+                # 外資+投信同向淨買 ≥ 2 日 → 在買入 reason 加正面確認
+                if both_buy >= 2:
+                    sig["signals"] = [
+                        {**s, "reason": s["reason"] +
+                         f"　（外資＋投信同向買入 {both_buy} 日 ✓）"}
+                        if s["type"] in ("BUY", "STRONG BUY") else s
+                        for s in sig["signals"]
+                    ]
 
             inst  = inst_flow.get(symbol, {})
             entry = {

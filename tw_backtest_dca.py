@@ -19,12 +19,13 @@ from zoneinfo import ZoneInfo
 from tw_screener import calc_rsi, load_config, SIGNAL_CONFIG, _DEFAULT_CFG
 from tw_backtest import calc_rolling_avwap, calc_rolling_dd, fetch_long
 
-BASE_DIR      = Path(__file__).parent
-CACHE_DIR     = BASE_DIR / "cache"
-TZ            = ZoneInfo("Asia/Taipei")
-ANNUAL_BUDGET = 100_000
-START_YEAR    = 2015
-END_YEAR      = 2025
+BASE_DIR         = Path(__file__).parent
+CACHE_DIR        = BASE_DIR / "cache"
+TZ               = ZoneInfo("Asia/Taipei")
+ANNUAL_BUDGET    = 100_000
+START_YEAR       = 2015
+END_YEAR         = 2025
+COMMISSION_RATE  = 0.001425   # 手續費 0.1425%（買賣均收）
 
 # 各股建議 DCA 策略（根據 10 年回測收斂結果）
 RECOMMENDED_DCA = {
@@ -86,7 +87,8 @@ def _build_market_mode_series(twii_close: pd.Series, etf50_close: pd.Series) -> 
 # ── 核心 DCA 引擎 ───────────────────────────────────────────────────────────────
 
 def _run_dca(
-    close: pd.Series,
+    close_raw: pd.Series,
+    dividends: pd.Series,
     high: pd.Series,
     low: pd.Series,
     volume: pd.Series,
@@ -96,12 +98,13 @@ def _run_dca(
     indicator_series: dict | None = None,
 ) -> dict:
     """
-    通用 DCA 引擎。
-    allow_buy:        每日布林 Series；None → 無條件（B&H DCA）
-    indicator_series: 用於記錄觸發條件的指標 Series 字典（key=欄位名，value=pd.Series）
+    通用 DCA 引擎（含手續費 + 股息再投入）。
+    close_raw:  原始未調整收盤價（成本計算用）
+    dividends:  每股配息金額 Series（以 ex-date 為 index）
+    allow_buy:  每日布林 Series；None → 無條件（B&H DCA）
     若當日不允許，資金累積到下次允許日。
     """
-    close = close.dropna()
+    close = close_raw.dropna()
     if close.empty:
         return {"label": label, "error": "no data"}
 
@@ -114,11 +117,17 @@ def _run_dca(
             first_trading_days[yr] = yr_data.index[0]
             last_trading_days[yr]  = yr_data.index[-1]
 
-    cash_reserve   = 0.0
-    shares_held    = 0.0
-    invested_total = 0.0
-    transactions   = []
-    pending_years  = set(first_trading_days.keys())
+    cash_reserve     = 0.0
+    shares_held      = 0.0
+    invested_total   = 0.0
+    total_fees       = 0.0
+    div_received     = 0.0   # 累積配息現金（已收到，再投入）
+    div_shares       = 0     # 配息再投入買入的總股數
+    transactions     = []
+    pending_years    = set(first_trading_days.keys())
+
+    # 將 dividends index 轉換為可快速查詢的 set
+    div_dates = set(dividends.index.normalize()) if not dividends.empty else set()
 
     for dt in close.index:
         yr = dt.year
@@ -126,11 +135,27 @@ def _run_dca(
             cash_reserve += ANNUAL_BUDGET
             pending_years.discard(yr)
 
-        if cash_reserve <= 0:
-            continue
-
         price = float(close.loc[dt])
         if np.isnan(price) or price <= 0:
+            continue
+
+        # ── 股息再投入（不計入 invested_total，屬於被動收入）──────────
+        dt_norm = dt.normalize()
+        if dt_norm in div_dates:
+            matching = dividends[dividends.index.normalize() == dt_norm]
+            if not matching.empty and shares_held > 0:
+                div_ps    = float(matching.iloc[0])
+                div_cash  = shares_held * div_ps
+                div_received += div_cash
+                # 用配息現金買入更多股數（扣手續費）
+                max_div_sh = int(div_cash / (price * (1 + COMMISSION_RATE)))
+                if max_div_sh > 0:
+                    d_fee = round(max_div_sh * price * COMMISSION_RATE, 0)
+                    shares_held  += max_div_sh
+                    div_shares   += max_div_sh
+                    total_fees   += d_fee
+
+        if cash_reserve <= 0:
             continue
 
         can_buy = True
@@ -143,17 +168,19 @@ def _run_dca(
                        and cash_reserve > 0)
 
         if can_buy or is_year_end:
-            bought = cash_reserve // price
-            if bought > 0:
-                cost           = bought * price
-                shares_held   += bought
+            max_sh = int(cash_reserve / (price * (1 + COMMISSION_RATE)))
+            if max_sh > 0:
+                fee            = round(max_sh * price * COMMISSION_RATE, 0)
+                cost           = max_sh * price + fee
+                shares_held   += max_sh
                 cash_reserve  -= cost
                 invested_total += cost
+                total_fees    += fee
                 is_fallback    = is_year_end and not can_buy
                 tx: dict = {
                     "date":     dt.date().isoformat(),
                     "price":    round(price, 2),
-                    "shares":   bought,
+                    "shares":   max_sh,
                     "cost":     round(cost, 0),
                     "fallback": is_fallback,
                 }
@@ -173,8 +200,8 @@ def _run_dca(
                         tx["trigger"] = trigger
                 transactions.append(tx)
 
-    final_price   = float(close.iloc[-1])
-    final_value   = shares_held * final_price + cash_reserve
+    final_price    = float(close.iloc[-1])
+    final_value    = shares_held * final_price + cash_reserve
     total_invested = invested_total + cash_reserve
 
     if total_invested == 0:
@@ -185,19 +212,23 @@ def _run_dca(
     cagr             = ((final_value / total_invested) ** (1 / n_years) - 1) * 100
 
     # 最大回撤（持股市值序列）
-    pv_list   = []
-    run_sh    = 0.0
-    tx_iter   = iter(transactions)
-    next_tx   = next(tx_iter, None)
+    pv_list = []
+    run_sh  = 0.0
+    tx_iter = iter(transactions)
+    next_tx = next(tx_iter, None)
     for dt in close.index:
         if next_tx and dt.date().isoformat() == next_tx["date"]:
             run_sh  += next_tx["shares"]
             next_tx  = next(tx_iter, None)
         pv_list.append(run_sh * float(close.loc[dt]))
-    pv_s       = pd.Series(pv_list, index=close.index)
-    roll_max   = pv_s.cummax()
-    drawdown   = (pv_s - roll_max) / roll_max.replace(0, np.nan) * 100
-    max_dd     = float(drawdown.min())
+    pv_s     = pd.Series(pv_list, index=close.index)
+    roll_max = pv_s.cummax()
+    drawdown = (pv_s - roll_max) / roll_max.replace(0, np.nan) * 100
+    max_dd   = float(drawdown.min())
+
+    # 年均殖利率估計（配息收入 / 實際注資 / 年數）
+    ann_yield_pct = (div_received / invested_total / n_years * 100
+                     if invested_total > 0 else 0.0)
 
     profit = final_value - total_invested
     return {
@@ -210,6 +241,10 @@ def _run_dca(
         "max_drawdown_pct":  round(max_dd, 2),
         "n_transactions":    len(transactions),
         "final_price":       round(final_price, 2),
+        "total_fees":        round(total_fees, 0),
+        "div_received":      round(div_received, 0),
+        "div_shares":        div_shares,
+        "ann_yield_pct":     round(ann_yield_pct, 2),
         "transactions":      transactions,
     }
 
@@ -240,71 +275,87 @@ def _crash_performance(close: pd.Series) -> list[dict]:
 
 # ── 四策略批次比較 ──────────────────────────────────────────────────────────────
 
-def _fetch_dca_data(symbol: str) -> pd.DataFrame:
-    """用明確起始日期抓 10 年資料（period='10y' 對台股 .TW 不穩定）。"""
+def _fetch_dca_data(symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    回傳 (df_adj, df_raw)：
+      df_adj  — 調整後收盤（用於指標計算：RSI / AVWAP / DD）
+      df_raw  — 原始收盤 + Dividends 欄（用於投資組合模擬與成本計算）
+    """
     ticker = yf.Ticker(symbol)
-    df = ticker.history(start=f"{START_YEAR}-01-01",
-                        end=f"{END_YEAR}-12-31",
-                        auto_adjust=True)
-    if df.empty:
-        return df
-    df.index = df.index.tz_convert(TZ)
-    return df
+    kw = dict(start=f"{START_YEAR}-01-01", end=f"{END_YEAR}-12-31")
+    df_adj = ticker.history(**kw, auto_adjust=True)
+    df_raw = ticker.history(**kw, auto_adjust=False)
+    for df in (df_adj, df_raw):
+        if not df.empty:
+            df.index = df.index.tz_convert(TZ)
+    return df_adj, df_raw
 
 
 def run_dca_backtest(symbol: str, name: str, cfg: dict,
                      twii_close: pd.Series, etf50_close: pd.Series) -> dict:
     print(f"  DCA 回測 {symbol} {name}...")
-    df = _fetch_dca_data(symbol)
-    if df.empty or len(df) < 500:
-        print(f"    [!] 資料不足（{len(df)} 天），跳過")
+    df_adj, df_raw = _fetch_dca_data(symbol)
+    if df_adj.empty or len(df_adj) < 500:
+        print(f"    [!] 資料不足（{len(df_adj)} 天），跳過")
         return {"symbol": symbol, "name": name, "error": "資料不足"}
 
-    close  = df["Close"].dropna()
-    high   = df["High"].reindex(close.index)
-    low    = df["Low"].reindex(close.index)
-    volume = df["Volume"].reindex(close.index)
+    # 調整後價格用於指標計算
+    close_adj = df_adj["Close"].dropna()
+    high_adj  = df_adj["High"].reindex(close_adj.index)
+    low_adj   = df_adj["Low"].reindex(close_adj.index)
+    vol_adj   = df_adj["Volume"].reindex(close_adj.index)
+
+    # 原始價格 + 配息用於投資組合模擬
+    close_raw = df_raw["Close"].dropna() if not df_raw.empty else close_adj.copy()
+    close_raw = close_raw.reindex(close_adj.index, method="ffill")
+    dividends = pd.Series(dtype=float)
+    if not df_raw.empty and "Dividends" in df_raw.columns:
+        dividends = df_raw["Dividends"][df_raw["Dividends"] > 0]
+
     stock_cfg = SIGNAL_CONFIG.get(symbol, _DEFAULT_CFG)
 
-    # 預計算 v2 指標
-    rsi   = calc_rsi(close, 14)
-    avwap = calc_rolling_avwap(close, high, low, volume, lookback=60)
-    dd    = calc_rolling_dd(close, lookback=60)
+    # 預計算 v2 指標（使用調整後價格）
+    rsi   = calc_rsi(close_adj, 14)
+    avwap = calc_rolling_avwap(close_adj, high_adj, low_adj, vol_adj, lookback=60)
+    dd    = calc_rolling_dd(close_adj, lookback=60)
 
     b1 = avwap * stock_cfg["b1"]
     b2 = avwap * stock_cfg["b2"]
 
-    # 布林過濾 Series
-    buy_filter   = (dd <= -0.10) & (close < b1) & (rsi <= stock_cfg["rsi_buy"])
-    sbuy_filter  = (dd <= -0.20) & (close < b2) & (rsi <= stock_cfg["rsi_sbuy"])
+    # 布林過濾 Series（基於調整後指標）
+    buy_filter   = (dd <= -0.10) & (close_adj < b1) & (rsi <= stock_cfg["rsi_buy"])
+    sbuy_filter  = (dd <= -0.20) & (close_adj < b2) & (rsi <= stock_cfg["rsi_sbuy"])
 
     # 市場模式過濾：WARN/RISK 時才允許加碼（逆向加碼策略）
     mode_series  = _build_market_mode_series(twii_close, etf50_close)
-    mode_aligned = mode_series.reindex(close.index, method="ffill").fillna("NORMAL")
+    mode_aligned = mode_series.reindex(close_adj.index, method="ffill").fillna("NORMAL")
     market_dip   = mode_aligned.isin(["WARN", "RISK"])
 
     # bnh_dca 旗標：超強趨勢股不做擇時，全部策略都用 B&H
     is_bnh_only = stock_cfg.get("bnh_dca", False)
 
-    vs_b1 = ((close / b1) - 1) * 100
-    vs_b2 = ((close / b2) - 1) * 100
+    vs_b1 = ((close_adj / b1) - 1) * 100
+    vs_b2 = ((close_adj / b2) - 1) * 100
+
+    _dca_kw = dict(high=high_adj, low=low_adj, volume=vol_adj,
+                   symbol=symbol, dividends=dividends)
 
     if is_bnh_only:
         strategies = [
-            _run_dca(close, high, low, volume, symbol,
+            _run_dca(close_raw, **_dca_kw,
                      allow_buy=None, label="B&H DCA（趨勢股，無條件）"),
         ]
     else:
         strategies = [
-            _run_dca(close, high, low, volume, symbol,
+            _run_dca(close_raw, **_dca_kw,
                      allow_buy=None, label="B&H DCA（無條件）"),
-            _run_dca(close, high, low, volume, symbol,
+            _run_dca(close_raw, **_dca_kw,
                      allow_buy=buy_filter, label="v2 BUY DCA",
                      indicator_series={"DD%": dd * 100, "RSI": rsi, "vs_b1%": vs_b1}),
-            _run_dca(close, high, low, volume, symbol,
+            _run_dca(close_raw, **_dca_kw,
                      allow_buy=sbuy_filter, label="v2 STRONG BUY DCA",
                      indicator_series={"DD%": dd * 100, "RSI": rsi, "vs_b2%": vs_b2}),
-            _run_dca(close, high, low, volume, symbol,
+            _run_dca(close_raw, **_dca_kw,
                      allow_buy=market_dip, label="市場警戒逆向加碼",
                      indicator_series={"市場模式": mode_aligned, "DD%": dd * 100}),
         ]

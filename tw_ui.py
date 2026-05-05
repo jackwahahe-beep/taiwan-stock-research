@@ -639,14 +639,17 @@ class TwStrategyApp(ctk.CTk):
         bnh_cagr  = bnh_strat["cagr_pct"] if bnh_strat else 0
 
         for strat in dca.get("strategies", []):
-            cagr   = strat.get("cagr_pct", 0)
-            total  = strat.get("total_return_pct", 0)
-            mdd    = strat.get("max_drawdown_pct", 0)
-            fval   = strat.get("final_value", 0)
-            inv    = strat.get("total_invested", 0)
-            ntx    = strat.get("n_transactions", 0)
-            lbl    = strat["label"]
-            beat   = cagr > bnh_cagr and "B&H" not in lbl
+            cagr      = strat.get("cagr_pct", 0)
+            total     = strat.get("total_return_pct", 0)
+            mdd       = strat.get("max_drawdown_pct", 0)
+            fval      = strat.get("final_value", 0)
+            inv       = strat.get("total_invested", 0)
+            ntx       = strat.get("n_transactions", 0)
+            fees      = strat.get("total_fees", 0)
+            div_rcv   = strat.get("div_received", 0)
+            div_yield = strat.get("ann_yield_pct", 0)
+            lbl       = strat["label"]
+            beat      = cagr > bnh_cagr and "B&H" not in lbl
 
             card = ctk.CTkFrame(self._bt_detail,
                                 fg_color="#0d2d0d" if beat else "#0d1a2d",
@@ -685,6 +688,23 @@ class TwStrategyApp(ctk.CTk):
                              font=(self.ui_font, 11, "bold"), text_color=clr).pack()
                 if label in _DCA_METRIC_TIPS:
                     _Tooltip(col, _DCA_METRIC_TIPS[label])
+
+            # ── 費用 + 股息再投入 小計列 ──────────────────────────────
+            info_parts = []
+            if fees > 0:
+                info_parts.append(f"手續費 NT${fees:,.0f}")
+            if div_rcv > 0:
+                info_parts.append(
+                    f"股息再投入 NT${div_rcv:,.0f}（年均殖利率 {div_yield:.1f}%）")
+            else:
+                info_parts.append("股息資料不足（yfinance 未提供）")
+            info_row = ctk.CTkFrame(card, fg_color="transparent")
+            info_row.pack(fill="x", padx=14, pady=(0, 4))
+            ctk.CTkLabel(info_row,
+                         text="  ｜  ".join(info_parts),
+                         font=(self.ui_font, 9),
+                         text_color=C_GREEN if div_rcv > 0 else C_GRAY
+                         ).pack(side="left")
 
             txs = strat.get("transactions", strat.get("last_tx", []))
             if txs:

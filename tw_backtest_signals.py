@@ -727,17 +727,18 @@ def build_signal_backtest_embed(result: dict) -> dict:
 def run_portfolio_backtest(
     symbols_cfg: list[dict],
     annual_injection: float = 100_000,
-    lot_pct_bull: float = 0.15,
-    lot_pct_bear: float = 0.30,
+    lot_pct_etf: float = 0.15,
+    lot_pct_tech: float = 0.30,
     sbuy_mult: float = 1.5,
     start_date: str = START_DATE,
     end_date: str = END_DATE,
 ) -> dict:
     """
-    多股票共用資金池回測（年度注資 DCA 版，牛熊動態倉位）。
+    多股票共用資金池回測（年度注資 DCA 版，保守/衝刺分組倉位）。
     - 每年第一個交易日注入 annual_injection 到現金池
-    - 每筆進場 = lot_pct_bull/bear × annual_injection，依當日 TWII MA200 斜率切換
-    - STRONG BUY 用 sbuy_mult 倍；熊市用更大比例主動加碼
+    - ETF（保守）進場 = lot_pct_etf × annual_injection
+    - 科技股（衝刺）進場 = lot_pct_tech × annual_injection
+    - STRONG BUY 用 sbuy_mult 倍
     - 多個信號同日：STRONG BUY 優先，次按 RSI 由低到高（最超賣先進）
     - 隔日開盤執行 + SLIPPAGE 滑價
     """
@@ -761,11 +762,11 @@ def run_portfolio_backtest(
     # 2. 統一日期軸
     all_dates = sorted(set().union(*[s.index for s in all_sigs.values()]))
 
-    # 2b. 大盤牛熊旗標（TWII MA200 20日斜率）
-    try:
-        bull_flags = _fetch_twii_bull_series(start_date, end_date)
-    except Exception:
-        bull_flags = pd.Series(dtype=bool)
+    # 2b. 預計算各股的倉位大小（ETF保守 / 科技衝刺）
+    lot_size_map = {
+        sym: annual_injection * (lot_pct_etf if sym in ETF_SYMBOLS else lot_pct_tech)
+        for sym in all_sigs
+    }
 
     # 3. 模擬
     cash         = 0.0
@@ -781,11 +782,6 @@ def run_portfolio_backtest(
             inj_year = dt.year
             cash += annual_injection
             n_injections += 1
-
-        # 當日牛熊動態倉位
-        flag_val  = bull_flags.asof(dt) if len(bull_flags) > 0 else True
-        in_bull   = bool(flag_val) if not pd.isna(flag_val) else True
-        lot_size  = annual_injection * (lot_pct_bull if in_bull else lot_pct_bear)
 
         # 收集當日各股狀態
         day: dict[str, dict] = {}
@@ -844,7 +840,7 @@ def run_portfolio_backtest(
         candidates.sort(key=lambda x: (x[0], x[1]))
 
         for pri, _, sym, d in candidates:
-            spend = lot_size * (sbuy_mult if pri == 0 else 1.0)
+            spend = lot_size_map[sym] * (sbuy_mult if pri == 0 else 1.0)
             if cash < spend * 0.5:
                 break
             ep     = d["exec_buy"]
@@ -906,7 +902,7 @@ def run_portfolio_backtest(
     total_fees     = sum(t.get("fees", 0) for t in trades)
 
     print(f"[組合回測] {len(all_sigs)}檔  年注 NT${annual_injection:,.0f}×{n_injections}年"
-          f"  牛{lot_pct_bull*100:.0f}%/熊{lot_pct_bear*100:.0f}%"
+          f"  ETF{lot_pct_etf*100:.0f}%/科技{lot_pct_tech*100:.0f}%"
           f"  → NT${final_val:,.0f}  CAGR {cagr:+.1f}%  MDD {mdd:.1f}%  Calmar {calmar:.2f}")
 
     return {

@@ -460,6 +460,7 @@ class TwStrategyApp(ctk.CTk):
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         _add_tree_col_tips(self.tree, _SCAN_COL_TIPS)
+        self.tree.bind("<Double-1>", self._on_scan_row_dblclick)
 
         for tag, fg, bg in [
             ("strong_buy",    C_STRONG,  BG_ROW_A),
@@ -1909,6 +1910,12 @@ class TwStrategyApp(ctk.CTk):
                           f"{result.get('start_date','')} → {result.get('end_date','')}",
                      font=(self.ui_font, 13, "bold"), text_color=C_BLUE
                      ).pack(side="left")
+        ctk.CTkButton(hdr, text="📊 K 線圖",
+                      font=(self.ui_font, 10), width=80, height=24,
+                      fg_color="#1a2a10", hover_color="#2a4020",
+                      text_color="#a8e6cf",
+                      command=lambda: self._chart_popup(sym, name),
+                      ).pack(side="right", padx=4)
         ctk.CTkButton(hdr, text="📈 資產曲線",
                       font=(self.ui_font, 10), width=90, height=24,
                       fg_color="#1a3040", hover_color="#2a4a60",
@@ -2651,6 +2658,216 @@ class TwStrategyApp(ctk.CTk):
                          font=(self.ui_font, 11)).pack(expand=True)
 
         threading.Thread(target=_bg, daemon=True).start()
+
+    # ── K 線圖 Popup ───────────────────────────────────────────────────────
+
+    def _on_scan_row_dblclick(self, event):
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        vals = self.tree.item(item, "values")
+        if not vals:
+            return
+        sym_raw = str(vals[0]).strip()
+        name    = str(vals[1]).strip() if len(vals) > 1 else sym_raw
+        symbol  = sym_raw if sym_raw.endswith(".TW") else f"{sym_raw}.TW"
+        self._chart_popup(symbol, name)
+
+    def _chart_popup(self, symbol: str, name: str, days: int = 120):
+        import tkinter as tk
+        from tkinter import ttk as _ttv
+
+        win = tk.Toplevel(self)
+        win.title(f"{symbol.replace('.TW','')}  {name}  — K 線圖")
+        win.geometry("960x620")
+        win.configure(bg="#0f1a30")
+        win.lift()
+
+        # 天數切換列
+        ctrl = tk.Frame(win, bg="#0f1a30")
+        ctrl.pack(fill="x", padx=10, pady=(6, 0))
+        tk.Label(ctrl, text=f"{name}（{symbol.replace('.TW','')}）",
+                 fg="#74b9ff", bg="#0f1a30", font=(self.ui_font, 12, "bold")).pack(side="left", padx=8)
+
+        _days_var = tk.IntVar(value=days)
+        canvas_holder = [None]  # mutable ref for redraw
+
+        lbl_load = tk.Label(win, text="載入中…", fg="#a8e6cf", bg="#0f1a30",
+                            font=(self.ui_font, 11))
+        lbl_load.pack(expand=True)
+
+        def _load(n_days):
+            lbl_load.configure(text="載入中…")
+            if canvas_holder[0]:
+                try:
+                    canvas_holder[0].get_tk_widget().destroy()
+                except Exception:
+                    pass
+                canvas_holder[0] = None
+
+            def _bg():
+                try:
+                    import yfinance as yf
+                    import pandas as pd
+                    import matplotlib
+                    matplotlib.use("TkAgg")
+                    import matplotlib.pyplot as plt
+                    import matplotlib.patches as mpatches
+                    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+                    end_dt  = pd.Timestamp.today()
+                    start_dt = end_dt - pd.Timedelta(days=n_days + 60)
+                    df = yf.Ticker(symbol).history(
+                        start=start_dt.strftime("%Y-%m-%d"),
+                        end=end_dt.strftime("%Y-%m-%d"),
+                        auto_adjust=True
+                    ).tail(n_days)
+                    if df.empty:
+                        if win.winfo_exists():
+                            win.after(0, lambda: lbl_load.configure(text="無資料", fg="#e74c3c"))
+                        return
+
+                    # 信號計算（重用 tw_backtest_signals）
+                    from tw_backtest_signals import _daily_signals, _fetch
+                    sig_df = _fetch(symbol,
+                                    start=(end_dt - pd.Timedelta(days=n_days + 300)).strftime("%Y-%m-%d"),
+                                    end=end_dt.strftime("%Y-%m-%d"))
+                    if not sig_df.empty and len(sig_df) >= 100:
+                        from tw_backtest_signals import _daily_signals
+                        sigs = _daily_signals(sig_df, symbol).tail(n_days)
+                    else:
+                        sigs = None
+
+                    def _draw():
+                        if not win.winfo_exists():
+                            return
+                        lbl_load.pack_forget()
+
+                        plt.rcParams.update({
+                            "font.sans-serif": ["Microsoft JhengHei", "SimHei", "sans-serif"],
+                            "axes.unicode_minus": False,
+                        })
+                        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.2, 5),
+                                                        gridspec_kw={"height_ratios": [4, 1]},
+                                                        facecolor="#0f1a30")
+                        fig.subplots_adjust(hspace=0.04, left=0.07, right=0.97, top=0.94, bottom=0.07)
+
+                        closes = df["Close"]
+                        opens  = df["Open"]
+                        highs  = df["High"]
+                        lows   = df["Low"]
+                        vols   = df["Volume"]
+                        dates  = list(range(len(df)))
+                        idx    = df.index
+
+                        # 蠟燭圖（用 matplotlib patches）
+                        for i, (dt, row) in enumerate(df.iterrows()):
+                            o, c, h, l = row["Open"], row["Close"], row["High"], row["Low"]
+                            color = "#26a69a" if c >= o else "#ef5350"
+                            ax1.plot([i, i], [l, h], color=color, linewidth=0.8, zorder=1)
+                            rect = mpatches.FancyBboxPatch(
+                                (i - 0.35, min(o, c)), 0.7, abs(c - o) or 0.01,
+                                boxstyle="square,pad=0", linewidth=0,
+                                facecolor=color, zorder=2
+                            )
+                            ax1.add_patch(rect)
+
+                        # MA 線
+                        for ma_n, color, lw in [(20, "#f39c12", 1.0), (60, "#9b59b6", 0.8)]:
+                            ma = closes.rolling(ma_n).mean()
+                            valid = ma.dropna()
+                            if len(valid) > 0:
+                                vi = [dates[df.index.get_loc(d)] for d in valid.index]
+                                ax1.plot(vi, valid.values, color=color,
+                                         linewidth=lw, alpha=0.8, label=f"MA{ma_n}")
+
+                        # 信號標記
+                        if sigs is not None:
+                            for dt, row in sigs.iterrows():
+                                if dt not in df.index:
+                                    continue
+                                i   = df.index.get_loc(dt)
+                                sig = row["signal"]
+                                if sig == "STRONG BUY":
+                                    ax1.annotate("▲", xy=(i, float(lows.iloc[i]) * 0.993),
+                                                 fontsize=8, color="#ff6b35", ha="center",
+                                                 fontweight="bold")
+                                elif sig == "BUY":
+                                    ax1.annotate("△", xy=(i, float(lows.iloc[i]) * 0.993),
+                                                 fontsize=7, color="#2ecc71", ha="center")
+                                elif sig == "SELL":
+                                    ax1.annotate("▽", xy=(i, float(highs.iloc[i]) * 1.007),
+                                                 fontsize=7, color="#e74c3c", ha="center")
+
+                        # X 軸刻度（每 ~20 根顯示日期）
+                        step = max(1, len(dates) // 8)
+                        ax1.set_xticks(dates[::step])
+                        ax1.set_xticklabels(
+                            [idx[i].strftime("%m/%d") for i in dates[::step]],
+                            fontsize=7, color="#95a5a6"
+                        )
+                        ax1.set_xlim(-1, len(dates))
+                        ax1.set_facecolor("#0d1b2a")
+                        ax1.set_title(f"{name}（{symbol.replace('.TW','')}）  {n_days}日 K 線",
+                                      color="#74b9ff", fontsize=10)
+                        ax1.tick_params(colors="#95a5a6", labelsize=8, labelbottom=False)
+                        ax1.grid(color="#1e3a5f", linewidth=0.3, axis="y")
+                        ax1.spines[:].set_color("#2a3a5a")
+                        if any(m for m in [(20, None, None), (60, None, None)]):
+                            ax1.legend(loc="upper left", fontsize=7,
+                                       facecolor="#0d1b2a", labelcolor="#dce8f0", framealpha=0.6)
+
+                        # 成交量
+                        vol_colors = ["#26a69a" if df["Close"].iloc[i] >= df["Open"].iloc[i]
+                                      else "#ef5350" for i in range(len(df))]
+                        ax2.bar(dates, vols / 1_000_000, color=vol_colors, alpha=0.7, width=0.8)
+                        ax2.set_facecolor("#0d1b2a")
+                        ax2.set_ylabel("量(M)", color="#95a5a6", fontsize=7)
+                        ax2.set_xlim(-1, len(dates))
+                        ax2.set_xticks(dates[::step])
+                        ax2.set_xticklabels(
+                            [idx[i].strftime("%m/%d") for i in dates[::step]],
+                            fontsize=7, color="#95a5a6"
+                        )
+                        ax2.tick_params(colors="#95a5a6", labelsize=7)
+                        ax2.grid(color="#1e3a5f", linewidth=0.3, axis="y")
+                        ax2.spines[:].set_color("#2a3a5a")
+
+                        # 圖例說明（信號）
+                        from matplotlib.lines import Line2D
+                        handles = [
+                            Line2D([0], [0], marker="^", color="w", markerfacecolor="#ff6b35",
+                                   markersize=7, label="STRONG BUY", linestyle="None"),
+                            Line2D([0], [0], marker="^", color="w", markerfacecolor="#2ecc71",
+                                   markersize=6, label="BUY", linestyle="None"),
+                            Line2D([0], [0], marker="v", color="w", markerfacecolor="#e74c3c",
+                                   markersize=6, label="SELL", linestyle="None"),
+                        ]
+                        ax1.legend(handles=handles + ax1.get_legend_handles_labels()[0][len(handles):],
+                                   loc="upper left", fontsize=7,
+                                   facecolor="#0d1b2a", labelcolor="#dce8f0", framealpha=0.6,
+                                   ncol=3)
+
+                        canv = FigureCanvasTkAgg(fig, master=win)
+                        canv.draw()
+                        canv.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=(0, 4))
+                        canvas_holder[0] = canv
+
+                    win.after(0, _draw)
+                except Exception as e:
+                    if win.winfo_exists():
+                        win.after(0, lambda: lbl_load.configure(text=f"Error: {e}", fg="#e74c3c"))
+
+            threading.Thread(target=_bg, daemon=True).start()
+
+        # 天數切換按鈕
+        for n, label in [(60, "60日"), (120, "120日"), (180, "180日"), (365, "1年")]:
+            tk.Button(ctrl, text=label, bg="#1a2a40", fg="#dce8f0",
+                      activebackground="#2d4a6a", activeforeground="white",
+                      font=(self.ui_font, 9), relief="flat", padx=8, pady=3,
+                      command=lambda d=n: _load(d)).pack(side="right", padx=2)
+
+        _load(days)
 
     # ── 組合回測 Popup ──────────────────────────────────────────────────────
     def _sbt_portfolio_popup(self):

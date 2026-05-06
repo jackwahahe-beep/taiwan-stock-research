@@ -44,6 +44,7 @@ SLIPPAGE        = 0.001      # 滑價 0.1%（買進加，賣出減）
 
 PORTFOLIO_INITIAL  = 1_200_000   # 組合回測初始資金 NT$
 PORTFOLIO_LOT_PCT  = 0.10        # 每筆進場佔初始資金比例（10%）
+RISK_FREE          = 0.015       # 無風險利率（台灣一年期定存近似值）
 
 
 # ── 資料拉取 ──────────────────────────────────────────────────────────────
@@ -76,6 +77,15 @@ def _fetch_twii_bull_series(start: str, end: str) -> pd.Series:
     ma200 = close.rolling(200).mean()
     bull  = ma200.diff(20) > 0          # 20 交易日斜率 > 0 = 牛市
     return bull[bull.index >= pd.Timestamp(start, tz=TZ)]
+
+
+def _sharpe(eq: pd.Series, rf_annual: float = RISK_FREE) -> float:
+    """年化 Sharpe ratio（以日報酬序列計算）。資料不足時回傳 0。"""
+    ret = eq.pct_change().dropna()
+    if len(ret) < 20 or ret.std() == 0:
+        return 0.0
+    rf_daily = rf_annual / 252
+    return round((ret.mean() - rf_daily) / ret.std() * (252 ** 0.5), 2)
 
 
 # ── 滾動 AVWAP（與 tw_screener.calc_avwap 邏輯一致）──────────────────────
@@ -185,6 +195,7 @@ def _simulate(sig: pd.DataFrame,
     inject_count:      int        = 0
     open_lots:         list[dict] = []
     trades:            list[dict] = []
+    equity_ts:         dict       = {}
     prev_sig           = "HOLD"
     current_year       = None
     deployed_this_year = False
@@ -345,9 +356,10 @@ def _simulate(sig: pd.DataFrame,
             if _buy_lot("FALLBACK", cash):
                 deployed_this_year = True
 
-        # MDD 追蹤
-        open_value = sum(l["shares"] * price for l in open_lots)
-        equity     = cash + open_value
+        # 每日 equity 追蹤（用於 MDD 與 Sharpe）
+        open_value   = sum(l["shares"] * price for l in open_lots)
+        equity       = cash + open_value
+        equity_ts[dt] = equity
         if equity > peak_equity:
             peak_equity = equity
         if peak_equity > 0:
@@ -375,21 +387,22 @@ def _simulate(sig: pd.DataFrame,
                            "hold_days": hd, "exit_signal": "PERIOD_END",
                            "fees": round(all_fees, 0),
                            "exit_cond": ec})
-    return trades, total_injected, max_dd_pct
+    return trades, total_injected, max_dd_pct, pd.Series(equity_ts).sort_index()
 
 
 # ── 統計摘要 ──────────────────────────────────────────────────────────────
 
 def _stats(trades: list[dict], bnh_ret: float = 0.0,
            total_injected: float = 0.0, years: float = 10.0,
-           mdd_pct: float = 0.0) -> dict:
+           mdd_pct: float = 0.0, sharpe: float = 0.0) -> dict:
     if not trades:
         return {"n_trades": 0, "n_wins": 0, "win_rate": 0.0,
                 "total_invested": 0, "total_injected": round(total_injected, 0),
                 "total_pnl": 0, "return_pct": 0.0, "cagr_pct": 0.0,
                 "avg_hold_days": 0, "best_pct": 0.0, "worst_pct": 0.0,
                 "beats_bnh": False, "n_open_end": 0,
-                "mdd_pct": round(mdd_pct, 1), "total_fees": 0, "calmar": 0.0}
+                "mdd_pct": round(mdd_pct, 1), "total_fees": 0, "calmar": 0.0,
+                "sharpe": 0.0}
     deployed = sum(t["cost"] for t in trades)
     pnl      = sum(t["pnl"]  for t in trades)
     n_win    = sum(1 for t in trades if t["pnl"] > 0)
@@ -409,6 +422,7 @@ def _stats(trades: list[dict], bnh_ret: float = 0.0,
         "return_pct":     ret,
         "cagr_pct":       cagr,
         "calmar":         calmar,
+        "sharpe":         round(sharpe, 2),
         "avg_hold_days":  round(sum(t["hold_days"] for t in trades) / len(trades)),
         "best_pct":       round(max(t["pnl_pct"] for t in trades), 2),
         "worst_pct":      round(min(t["pnl_pct"] for t in trades), 2),
@@ -505,11 +519,12 @@ def run_signal_backtest(symbol: str, name: str,
     modes_out = []
     for mode_id, label, buy_en, sbuy_en, trim_en, trail_en, dyn_scale_en in MODES:
         use_mf = (mode_id == "TRIM_MF")
-        trades, injected, mdd = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget,
-                                          symbol=symbol, max_inject_years=max_inject_yrs,
-                                          bull_flags=bull_flags if use_mf else None,
-                                          trail_en=trail_en, dyn_scale_en=dyn_scale_en)
-        st = _stats(trades, bnh_ret, total_injected=injected, years=years, mdd_pct=mdd)
+        trades, injected, mdd, eq_s = _simulate(sig, buy_en, sbuy_en, trim_en, annual_budget,
+                                                 symbol=symbol, max_inject_years=max_inject_yrs,
+                                                 bull_flags=bull_flags if use_mf else None,
+                                                 trail_en=trail_en, dyn_scale_en=dyn_scale_en)
+        st = _stats(trades, bnh_ret, total_injected=injected, years=years, mdd_pct=mdd,
+                    sharpe=_sharpe(eq_s))
         flag = "[+]" if st["beats_bnh"] else "[-]"
         print(f"    {flag} {label:<20}  {st['n_trades']:>2}trade  "
               f"ret{st['return_pct']:+6.1f}%  CAGR{st['cagr_pct']:+5.1f}%  "
@@ -603,12 +618,12 @@ def run_walk_forward(symbol: str, name: str,
 
     results = []
     for mode_id, label, buy_en, sbuy_en, trim_en, trail_en, dyn_scale_en in MODES:
-        tr_in,  inj_in,  mdd_in  = _simulate(sig_in,  buy_en, sbuy_en, trim_en, annual_budget,
-                                              symbol=symbol, max_inject_years=inject_in,
-                                              trail_en=trail_en, dyn_scale_en=dyn_scale_en)
-        tr_out, inj_out, mdd_out = _simulate(sig_out, buy_en, sbuy_en, trim_en, annual_budget,
-                                              symbol=symbol, max_inject_years=inject_out,
-                                              trail_en=trail_en, dyn_scale_en=dyn_scale_en)
+        tr_in,  inj_in,  mdd_in,  _ = _simulate(sig_in,  buy_en, sbuy_en, trim_en, annual_budget,
+                                               symbol=symbol, max_inject_years=inject_in,
+                                               trail_en=trail_en, dyn_scale_en=dyn_scale_en)
+        tr_out, inj_out, mdd_out, _ = _simulate(sig_out, buy_en, sbuy_en, trim_en, annual_budget,
+                                               symbol=symbol, max_inject_years=inject_out,
+                                               trail_en=trail_en, dyn_scale_en=dyn_scale_en)
         st_in  = _stats(tr_in,  bnh_in,  total_injected=inj_in,  years=years_in,  mdd_pct=mdd_in)
         st_out = _stats(tr_out, bnh_out, total_injected=inj_out, years=years_out, mdd_pct=mdd_out)
         # 退化比例：out-of-sample CAGR vs in-sample CAGR
@@ -723,6 +738,57 @@ def build_signal_backtest_embed(result: dict) -> dict:
 
 
 # ── 組合回測（多股共用資金池）────────────────────────────────────────────────
+
+def _portfolio_bnh_0050(annual_injection: float, start_date: str, end_date: str) -> dict:
+    """0050 B&H 基準：相同年注資，每年第一個交易日全買 0050，從不賣出。"""
+    try:
+        df = _fetch("0050.TW", start=start_date, end=end_date)
+        if df.empty or len(df) < 50:
+            return {}
+    except Exception:
+        return {}
+
+    cash      = 0.0
+    shares    = 0.0
+    cost      = 0.0
+    inj_year  = None
+    n_inj     = 0
+    equity_ts: dict = {}
+
+    for dt, row in df.iterrows():
+        price = float(row["Close"]) if "Close" in row else float(row["close"])
+        if dt.year != inj_year:
+            inj_year = dt.year
+            cash += annual_injection
+            n_inj += 1
+            bought = int(cash // (price * (1 + COMMISSION_RATE)))
+            if bought > 0:
+                gross  = bought * price
+                b_fee  = round(gross * COMMISSION_RATE, 0)
+                cash  -= gross + b_fee
+                cost  += gross + b_fee
+                shares += bought
+        equity_ts[dt] = cash + shares * price
+
+    if not equity_ts:
+        return {}
+
+    eq             = pd.Series(equity_ts).sort_index()
+    total_injected = annual_injection * n_inj
+    final_val      = float(eq.iloc[-1])
+    years          = max(1.0, (eq.index[-1] - eq.index[0]).days / 365.25)
+    cagr           = ((final_val / total_injected) ** (1 / years) - 1) * 100 if total_injected > 0 else 0.0
+    underwater     = (eq / eq.cummax() - 1) * 100
+    return {
+        "final_value":    round(final_val, 0),
+        "total_injected": round(total_injected, 0),
+        "total_pnl":      round(final_val - total_injected, 0),
+        "cagr_pct":       round(cagr, 1),
+        "mdd_pct":        round(float(underwater.min()), 1),
+        "sharpe":         _sharpe(eq),
+        "equity_series":  eq,
+    }
+
 
 def run_portfolio_backtest(
     symbols_cfg: list[dict],
@@ -897,13 +963,18 @@ def run_portfolio_backtest(
     underwater     = (eq / eq.cummax() - 1) * 100
     mdd            = float(underwater.min())
     calmar         = round(-cagr / mdd, 2) if mdd < 0 else 0.0
+    sharpe         = _sharpe(eq)
     closed         = [t for t in trades if t["exit_signal"] != "PERIOD_END"]
     n_wins         = sum(1 for t in closed if t.get("pnl", 0) > 0)
     total_fees     = sum(t.get("fees", 0) for t in trades)
 
+    # 6. 0050 B&H 基準（相同年注資，每年初買 0050）
+    bnh_0050 = _portfolio_bnh_0050(annual_injection, start_date, end_date)
+
     print(f"[組合回測] {len(all_sigs)}檔  年注 NT${annual_injection:,.0f}×{n_injections}年"
           f"  ETF{lot_pct_etf*100:.0f}%/科技{lot_pct_tech*100:.0f}%"
-          f"  → NT${final_val:,.0f}  CAGR {cagr:+.1f}%  MDD {mdd:.1f}%  Calmar {calmar:.2f}")
+          f"  → NT${final_val:,.0f}  CAGR {cagr:+.1f}%  Sharpe {sharpe:.2f}"
+          f"  MDD {mdd:.1f}%  Calmar {calmar:.2f}")
 
     return {
         "annual_injection": annual_injection,
@@ -913,6 +984,7 @@ def run_portfolio_backtest(
         "cagr_pct":         round(cagr, 1),
         "mdd_pct":          round(mdd, 1),
         "calmar":           calmar,
+        "sharpe":           sharpe,
         "n_trades":         len(closed),
         "n_wins":           n_wins,
         "win_rate":         round(n_wins / len(closed) * 100, 1) if closed else 0.0,
@@ -923,6 +995,7 @@ def run_portfolio_backtest(
         "start_date":       eq.index[0].date().isoformat(),
         "end_date":         eq.index[-1].date().isoformat(),
         "symbols":          list(all_sigs.keys()),
+        "bnh_0050":         bnh_0050,
     }
 
 if __name__ == "__main__":

@@ -218,6 +218,7 @@ _SBT_METRIC_TIPS: dict[str, str] = {
     "報酬率":    "回測期間整體累積報酬率（未年化）",
     "CAGR":     "年化複合報酬率\n> 15% 良好，> 25% 優秀",
     "Calmar":   "Calmar 比率 = CAGR ÷ |MDD|\n每承擔 1% 最大回撤能獲得多少年化報酬\n> 0.3 良好，> 0.5 優秀，> 1.0 卓越",
+    "Sharpe":   "Sharpe 比率 = (年化報酬 − 無風險利率 1.5%) ÷ 年化波動率\n衡量每單位風險獲得的超額報酬\n> 0.5 可接受，> 1.0 良好，> 2.0 優秀",
     "總損益":    "回測期間的總實現損益（NT$）",
     "MDD":      "最大回撤（Max Drawdown）\n從淨值高點到最低點的最大虧損幅度\n< -10% 可接受，< -20% 需特別注意",
     "手續費+稅": "回測期間估算的交易成本\n手續費 0.1425% + 證交稅 0.3%（賣方）",
@@ -1963,8 +1964,8 @@ class TwStrategyApp(ctk.CTk):
         tbl = ctk.CTkFrame(self._sbt_detail, fg_color="#0a1020", corner_radius=8)
         tbl.pack(fill="x", padx=12, pady=(0, 10))
 
-        headers = ["策略", "交易次", "勝率", "總注資", "損益NT$", "報酬%", "CAGR%", "MDD%", "手續費NT$", "vs B&H"]
-        widths  = [165, 55, 60, 105, 105, 75, 70, 65, 90, 65]
+        headers = ["策略", "交易次", "勝率", "總注資", "損益NT$", "報酬%", "CAGR%", "MDD%", "Sharpe", "手續費NT$", "vs B&H"]
+        widths  = [165, 55, 60, 105, 105, 75, 70, 65, 55, 90, 65]
 
         hdr_row = ctk.CTkFrame(tbl, fg_color="#0f1a30")
         hdr_row.pack(fill="x", padx=2, pady=(2, 0))
@@ -1987,6 +1988,7 @@ class TwStrategyApp(ctk.CTk):
             (f"{bnh_ret:+.1f}%",                       75, C_GREEN if bnh_ret>=0 else C_RED),
             (f"{bnh_cagr:+.1f}%",                      70, C_GREEN if bnh_cagr>=0 else C_RED),
             ("—",                                       65, C_GRAY),
+            ("—",                                       55, C_GRAY),
             ("含費基準",                                 90, C_GRAY),
             ("基準",                                     65, C_YELLOW),
         ]:
@@ -2010,6 +2012,8 @@ class TwStrategyApp(ctk.CTk):
             wclr = C_GREEN if s["win_rate"] >= 60 else (C_YELLOW if s["win_rate"] >= 40 else C_RED)
             mdd       = s.get("mdd_pct", 0)
             tot_fees  = s.get("total_fees", 0)
+            sharpe    = s.get("sharpe", 0.0)
+            sclr      = C_GREEN if sharpe >= 1.0 else (C_YELLOW if sharpe >= 0.5 else C_GRAY)
             for val, w, clr in [
                 (f"{tag} {m['label']}",              165, C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_YELLOW)),
                 (str(s["n_trades"]),                  55,  C_GRAY),
@@ -2019,6 +2023,7 @@ class TwStrategyApp(ctk.CTk):
                 (f"{ret:+.1f}%",                      75,  rclr),
                 (f"{cagr:+.1f}%",                     70,  C_GREEN if cagr>=0 else C_RED),
                 (f"{mdd:.1f}%",                       65,  "#e17055" if mdd < -20 else (C_YELLOW if mdd < -10 else C_GRAY)),
+                (f"{sharpe:.2f}" if s["n_trades"] else "—", 55, sclr),
                 (f"NT${tot_fees:,.0f}",               90,  C_GRAY),
                 ("勝" if beat else ("—" if s["n_trades"]==0 else "輸"), 65, C_GREEN if beat else (C_GRAY if s["n_trades"]==0 else C_RED)),
             ]:
@@ -2795,28 +2800,38 @@ class TwStrategyApp(ctk.CTk):
                      font=(self.ui_font, 9), wraplength=920, justify="left"
                      ).pack(fill="x", padx=12, pady=(6, 0))
 
-            # ── 指標列 ──
-            hdr = tk.Frame(win, bg="#0f1a30")
-            hdr.pack(fill="x", padx=12, pady=(4, 2))
-            metrics = [
-                ("每年注資",  f"NT${r['annual_injection']:,.0f}"),
-                ("總注入",    f"NT${r['total_injected']:,.0f}"),
-                ("終值",      f"NT${r['final_value']:,.0f}"),
-                ("總損益",    f"NT${r['total_pnl']:+,.0f}"),
-                ("CAGR",      f"{r['cagr_pct']:+.1f}%"),
-                ("MDD",       f"{r['mdd_pct']:.1f}%"),
-                ("Calmar",    f"{r['calmar']:.2f}"),
-                ("交易筆數",  f"{r['n_trades']}筆"),
-                ("勝率",      f"{r['win_rate']:.0f}%"),
-            ]
-            for label, val in metrics:
-                col = tk.Frame(hdr, bg="#0f1a30"); col.pack(side="left", padx=8)
+            bnh = r.get("bnh_0050", {})
+
+            # ── 指標列：策略 vs 0050 B&H ──
+            def _metric_col(parent, label, val, ref_val=None):
+                col = tk.Frame(parent, bg="#0f1a30"); col.pack(side="left", padx=6)
                 tk.Label(col, text=label, fg="#95a5a6", bg="#0f1a30",
                          font=(self.ui_font, 9)).pack()
-                vc = ("#2ecc71" if "+" in val else
-                      "#e74c3c" if "-" in val else "#74b9ff")
+                vc = ("#2ecc71" if "+" in str(val) else
+                      "#e74c3c" if "-" in str(val) else "#74b9ff")
                 tk.Label(col, text=val, fg=vc, bg="#0f1a30",
                          font=(self.ui_font, 11, "bold")).pack()
+                if ref_val is not None:
+                    tk.Label(col, text=f"0050: {ref_val}", fg="#636e72", bg="#0f1a30",
+                             font=(self.ui_font, 8)).pack()
+
+            hdr = tk.Frame(win, bg="#0f1a30")
+            hdr.pack(fill="x", padx=12, pady=(4, 2))
+            _metric_col(hdr, "每年注資",  f"NT${r['annual_injection']:,.0f}")
+            _metric_col(hdr, "總注入",    f"NT${r['total_injected']:,.0f}")
+            _metric_col(hdr, "終值",      f"NT${r['final_value']:,.0f}",
+                        f"NT${bnh.get('final_value',0):,.0f}" if bnh else None)
+            _metric_col(hdr, "總損益",    f"NT${r['total_pnl']:+,.0f}",
+                        f"NT${bnh.get('total_pnl',0):+,.0f}" if bnh else None)
+            _metric_col(hdr, "CAGR",      f"{r['cagr_pct']:+.1f}%",
+                        f"{bnh.get('cagr_pct',0):+.1f}%" if bnh else None)
+            _metric_col(hdr, "Sharpe",    f"{r['sharpe']:.2f}",
+                        f"{bnh.get('sharpe',0):.2f}" if bnh else None)
+            _metric_col(hdr, "MDD",       f"{r['mdd_pct']:.1f}%",
+                        f"{bnh.get('mdd_pct',0):.1f}%" if bnh else None)
+            _metric_col(hdr, "Calmar",    f"{r['calmar']:.2f}")
+            _metric_col(hdr, "交易筆數",  f"{r['n_trades']}筆")
+            _metric_col(hdr, "勝率",      f"{r['win_rate']:.0f}%")
 
             # ── 圖表（資產曲線 + 水下曲線）──
             eq = r["equity_series"]
@@ -2826,11 +2841,17 @@ class TwStrategyApp(ctk.CTk):
                                            facecolor="#0f1a30")
             fig.subplots_adjust(hspace=0.08, left=0.10, right=0.98, top=0.93, bottom=0.06)
 
-            ax1.plot(eq.index, eq / 1000, color="#74b9ff", linewidth=1.8)
+            ax1.plot(eq.index, eq / 1000, color="#74b9ff", linewidth=1.8, label="策略")
             ax1.fill_between(eq.index, eq / 1000, float(eq.iloc[0]) / 1000,
                              alpha=0.15, color="#74b9ff")
+            if bnh and "equity_series" in bnh:
+                bnh_eq = bnh["equity_series"].reindex(eq.index, method="ffill")
+                ax1.plot(bnh_eq.index, bnh_eq / 1000, color="#f39c12",
+                         linewidth=1.0, linestyle="--", alpha=0.8, label="0050 B&H")
+                ax1.legend(loc="upper left", fontsize=7,
+                           facecolor="#0d1b2a", labelcolor="#dce8f0", framealpha=0.7)
             ax1.axhline(y=r["total_injected"] / 1000, color="#636e72",
-                        linewidth=0.8, linestyle="--", alpha=0.6)
+                        linewidth=0.8, linestyle=":", alpha=0.5)
             ax1.set_facecolor("#0d1b2a")
             ax1.set_title(f"Portfolio Equity Curve  {start[:4]}-{end[:4]}",
                           color="#74b9ff", fontsize=10)

@@ -279,6 +279,7 @@ def get_market_mode() -> tuple[str, dict]:
         twii_close = twii["Close"].dropna()
         twii_price = float(twii_close.iloc[-1])
         twii_ma200 = float(twii_close.rolling(200).mean().iloc[-1])
+        twii_ma60  = float(twii_close.rolling(60).mean().iloc[-1])
 
         # 0050 波動率（代替 VIX）
         etf50  = yf.Ticker("0050.TW").history(period="3mo", auto_adjust=True)
@@ -288,28 +289,38 @@ def get_market_mode() -> tuple[str, dict]:
             vol_20  = float(log_ret.iloc[-20:].std() * np.sqrt(252) * 100)  # 年化%
 
         twii_vs_ma200 = (twii_price - twii_ma200) / twii_ma200 * 100
+        twii_vs_ma60  = (twii_price - twii_ma60)  / twii_ma60  * 100
+
+        # 讀取回測驗證過的 regime_threshold（可從 param_sweep_results.json 微調）
+        try:
+            from tw_backtest_signals import load_sweep_params as _lsp
+            _rth = _lsp()["regime_threshold"]
+        except Exception:
+            _rth = 2.0
 
         # 判斷條件
         bear_count = sum([
-            twii_vs_ma200 < -2,   # 大盤跌破MA200超過2%
-            twii_vs_ma200 < 0,    # 大盤在MA200以下
-            vol_20 > 25,          # 年化波動率 >25%（相當於VIX偏高）
-            vol_20 > 20,          # 年化波動率 >20%
+            twii_vs_ma200 < -_rth,  # 大盤跌破MA200超過門檻
+            twii_vs_ma200 < 0,      # 大盤在MA200以下
+            vol_20 > 25,            # 年化波動率 >25%（相當於VIX偏高）
+            vol_20 > 20,            # 年化波動率 >20%
         ])
 
         # RISK：大盤確實跌破MA200才觸發（高波動率只在跌破時加重判定）
         if twii_vs_ma200 < -5 or (twii_vs_ma200 < 0 and vol_20 > 25):
             mode = "RISK"
-        # WARN：大盤在MA200附近（±2%）或波動率明顯偏高且大盤偏弱
-        elif twii_vs_ma200 < 2 or (vol_20 > 30 and twii_vs_ma200 < 10):
+        # WARN：大盤在MA200 +threshold% 以下，或波動率明顯偏高且大盤偏弱
+        elif twii_vs_ma200 < _rth or (vol_20 > 30 and twii_vs_ma200 < 10):
             mode = "WARN"
         else:
             mode = "NORMAL"
 
         detail = {
-            "twii_price": round(twii_price, 0),
-            "twii_ma200": round(twii_ma200, 0),
+            "twii_price":       round(twii_price, 0),
+            "twii_ma200":       round(twii_ma200, 0),
+            "twii_ma60":        round(twii_ma60, 0),
             "twii_vs_ma200_pct": round(twii_vs_ma200, 2),
+            "twii_vs_ma60_pct":  round(twii_vs_ma60, 2),
             "vol_20_annualized": round(vol_20, 1),
             "mode": mode,
         }
@@ -366,25 +377,28 @@ def calc_signals(df: pd.DataFrame, cfg: dict, symbol: str = "") -> dict:
     except Exception:
         pass
 
-    # AVWAP + DD
-    avwap = calc_avwap(df, lookback=60)
-    dd    = calc_drawdown(close, lookback=60)
+    # AVWAP + DD + 距60日高點跌幅
+    avwap         = calc_avwap(df, lookback=60)
+    dd            = calc_drawdown(close, lookback=60)
+    high_60d      = float(close.rolling(60).max().iloc[-1])
+    drop_from_high = (price_val - high_60d) / high_60d * 100   # 負值
 
     b1 = avwap * stock_cfg["b1"]
     b2 = avwap * stock_cfg["b2"]
     s  = avwap * stock_cfg["s"]
 
     latest = {
-        "price":      round(price_val, 2),
-        "rsi":        round(rsi_val, 1),
-        "weekly_rsi": weekly_rsi_val,
-        "ma_fast":    round(float(ma_fast.iloc[-1]), 2),
-        "ma_slow":    round(float(ma_slow.iloc[-1]), 2),
-        "avwap":      round(avwap, 2),
-        "dd_pct":     round(dd * 100, 1),
-        "volume":     int(volume.iloc[-1]),
-        "vol_ma20":   int(vol_ma20.iloc[-1]),
-        "signals":    [],
+        "price":                  round(price_val, 2),
+        "rsi":                    round(rsi_val, 1),
+        "weekly_rsi":             weekly_rsi_val,
+        "ma_fast":                round(float(ma_fast.iloc[-1]), 2),
+        "ma_slow":                round(float(ma_slow.iloc[-1]), 2),
+        "avwap":                  round(avwap, 2),
+        "dd_pct":                 round(dd * 100, 1),
+        "drop_from_60d_high_pct": round(drop_from_high, 1),
+        "volume":                 int(volume.iloc[-1]),
+        "vol_ma20":               int(vol_ma20.iloc[-1]),
+        "signals":                [],
     }
 
     # ── 買入信號 ──────────────────────────────────────────────────────────────
@@ -490,13 +504,22 @@ def run_scan() -> list[dict]:
                 print(f"    [!] 資料不足或無效，跳過")
                 continue
 
-            # 市場風險過濾：RISK模式只保留 STRONG BUY
+            # 市場風險過濾
+            rsi_now  = sig.get("rsi", 99)
+            drop_now = sig.get("drop_from_60d_high_pct", 0)
             filtered_signals = []
             for s in sig["signals"]:
                 if market_mode == "RISK" and s["type"] == "BUY":
-                    s = {**s, "type": "WATCH", "reason": f"[風險模式降級] {s['reason']}"}
+                    # 崩跌中：RSI < 30 且距60日高點跌逾15% → 保留為崩跌加碼 BUY
+                    if rsi_now < 30 and drop_now < -15:
+                        s = {**s, "reason": (
+                            f"[崩跌加碼] 距高點 {drop_now:.1f}%，RSI {rsi_now:.0f}"
+                            f"  ｜  {s['reason']}")}
+                    else:
+                        s = {**s, "type": "WATCH",
+                             "reason": f"[風險模式降級] {s['reason']}"}
                 elif market_mode == "WARN" and s["type"] == "BUY":
-                    pass  # WARN模式仍推播，但Discord embed會加警示
+                    pass  # WARN模式仍推播，Discord embed 加警示
                 filtered_signals.append(s)
             sig["signals"] = filtered_signals
             sig["market_mode"] = market_mode
@@ -507,23 +530,8 @@ def run_scan() -> list[dict]:
             both_buy  = trend.get("both_buy_days", 0)
             days_ok   = trend.get("days_ok", 0)
 
-            if days_ok >= 2:
-                # 外資連續 3 日淨賣 → BUY 降級為 WATCH
-                if cons_sell >= 3:
-                    sig["signals"] = [
-                        {**s, "type": "WATCH",
-                         "reason": f"[法人反向降級] 外資連續{cons_sell}日淨賣　{s['reason']}"}
-                        if s["type"] == "BUY" else s
-                        for s in sig["signals"]
-                    ]
-                # 外資+投信同向淨買 ≥ 2 日 → 在買入 reason 加正面確認
-                if both_buy >= 2:
-                    sig["signals"] = [
-                        {**s, "reason": s["reason"] +
-                         f"　（外資＋投信同向買入 {both_buy} 日 ✓）"}
-                        if s["type"] in ("BUY", "STRONG BUY") else s
-                        for s in sig["signals"]
-                    ]
+            # 法人趨勢僅供 Discord 顯示，不修改信號（需回測驗證後才可重啟過濾）
+            _ = cons_sell, both_buy, days_ok  # noqa: suppress unused warning
 
             inst  = inst_flow.get(symbol, {})
             entry = {

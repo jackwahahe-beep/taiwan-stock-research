@@ -10,6 +10,7 @@
 """
 
 import sys
+import json
 import time
 import yaml
 import schedule
@@ -18,8 +19,63 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BASE_DIR = Path(__file__).parent
-TZ = ZoneInfo("Asia/Taipei")
+BASE_DIR  = Path(__file__).parent
+CACHE_DIR = BASE_DIR / "cache"
+TZ        = ZoneInfo("Asia/Taipei")
+
+_MODE_HISTORY_FILE = CACHE_DIR / "market_mode_history.json"
+
+
+def _save_mode_and_check_recovery(mode: str, detail: dict) -> str | None:
+    """
+    今日 mode/detail 寫入 market_mode_history.json，
+    同時比對昨日資料，偵測是否有回升事件。
+    回傳: None | "ma60_cross" | "ma200_recovery"
+    """
+    today = date.today().isoformat()
+
+    # 載入歷史
+    history: dict = {}
+    if _MODE_HISTORY_FILE.exists():
+        try:
+            history = json.loads(_MODE_HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            history = {}
+
+    # 找最近一筆「非今日」記錄
+    prev_record = None
+    for d in sorted(history.keys(), reverse=True):
+        if d < today:
+            prev_record = history[d]
+            break
+
+    # 寫入今日
+    history[today] = {"mode": mode, "detail": detail}
+    # 保留最近 60 天
+    cutoff = (date.today() - timedelta(days=60)).isoformat()
+    history = {k: v for k, v in history.items() if k >= cutoff}
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _MODE_HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False, indent=2),
+                                  encoding="utf-8")
+
+    if prev_record is None:
+        return None
+
+    prev_mode   = prev_record.get("mode", "NORMAL")
+    prev_detail = prev_record.get("detail", {})
+
+    # 回升確認：模式從 WARN/RISK → NORMAL（代表 TWII 站回 MA200）
+    if prev_mode in ("WARN", "RISK") and mode == "NORMAL":
+        return "ma200_recovery"
+
+    # MA60 初步回升：昨日 vs MA60 ≤ 0，今日 > 0
+    prev_vs60 = prev_detail.get("twii_vs_ma60_pct", None)
+    curr_vs60 = detail.get("twii_vs_ma60_pct", None)
+    if prev_vs60 is not None and curr_vs60 is not None:
+        if prev_vs60 <= 0 and curr_vs60 > 0:
+            return "ma60_cross"
+
+    return None
 
 
 def is_trading_day(d: date | None = None) -> bool:
@@ -58,6 +114,21 @@ def run_once():
     print(f"\n--- 信號掃描 ---")
     results = run_scan()
     send_scan_results(results)
+
+    # 2. 市場回升偵測（每日掃描後比對昨日 mode）
+    try:
+        from tw_screener import get_market_mode
+        from tw_discord import build_recovery_alert_embed, send_webhook
+        cur_mode, cur_detail = get_market_mode()
+        alert_type = _save_mode_and_check_recovery(cur_mode, cur_detail)
+        if alert_type:
+            label = {"ma60_cross": "MA60 回升", "ma200_recovery": "MA200 回升確認"}[alert_type]
+            print(f"\n--- 市場回升警報：{label} ---")
+            embed = build_recovery_alert_embed(alert_type, cur_detail)
+            ok = send_webhook({"embeds": [embed]}, webhook_url)
+            print(f"[Discord] 回升警報推播 — {'成功' if ok else '失敗'}")
+    except Exception as e:
+        print(f"    [!] 市場回升偵測失敗：{e}")
 
     # 3. 持股追蹤（只在有操作信號時推播）
     print(f"\n--- 持股追蹤 ---")

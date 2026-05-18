@@ -1,8 +1,145 @@
 # AI_HANDOFF — 台股研究
 
-> 上次更新：2026-05-05（Session 13 完成）
+> 上次更新：2026-05-19（Session 16 完成）
 > GitHub：https://github.com/jackwahahe-beep/taiwan-stock-research
 > 最新 commit：見 git log
+
+---
+
+## 策略一致性鐵則
+
+> 掃描 tab「DCA策略」欄、Discord 推播建議策略、DCA tab 顯示策略，
+> **必須全部從最新回測快取動態讀取**，禁止手動維護 CATEGORY rec 欄或 RECOMMENDED_DCA。
+>
+> - `_load_dca_rec()` 讀取最新 `cache/dca_backtest_*.json`，回傳 `{symbol: short_label}`
+> - `tw_discord._dca_context_line()` 以 CAGR 最高者為最佳策略（不再查 RECOMMENDED_DCA）
+> - 重新跑 DCA 回測後重啟程式即自動更新全端顯示
+
+---
+
+## Session 16 — 完成事項（2026-05-19）
+
+### 鐵則確立
+- **所有策略參數都必須有回測依據，策略調整也必須來自回測結果**
+- 組合回測各股策略永遠從 `signal_backtest_*.json` 的 `best_mode` 讀取，不手動覆蓋
+- 沒有回測依據的規則（如法人流量過濾）已移除或標注 TODO
+
+### 推播 / 回測一致性修正（tw_discord.py, tw_screener.py）
+- Discord `send_scan_results()`：新增 SBUY-only 過濾（bm_mode=SBUY 時，非 STRONG BUY 信號不推播）
+- Discord `build_sell_embed()`：BNH 模式股票加警示欄位 "⚠️ 此股回測建議長期持有，不追隨 SELL"
+- Discord `_sbt_context_line()`：各 mode 附加退出策略提示（BNH/SBUY/TRIM/TRAIL/ALL_DYN）
+- `tw_screener.py`：移除未回測驗證的法人流量 BUY→WATCH 降級邏輯
+- `tw_screener.get_market_mode()`：WARN 邊界從硬編碼 ±2% 改為讀 `load_sweep_params()["regime_threshold"]`
+
+### 美股風格改善（tw_ui.py 組合回測 v2）
+- 新增 Sortino ratio 到 stats grid（`_V2_METRIC_TIPS` + 紫色標籤）
+- 新增「📋 交易明細」popup（3 tabs：B類信號交易 / A類DCA買入 / 年度績效比較）
+- 資產曲線改為 2-subplot：上方 equity + 下方 underwater DD% chart
+- 新增 Hybrid 模式 checkbox（B類股同時享年初 DCA 50% + 信號買入 50%）
+
+### 參數掃描基礎設施（tw_backtest_signals.py）
+- `load_sweep_params()`：新增返回 `bull_mult/warn_mult/bear_mult/a_cash_frac/b_base_pct`（含預設值）
+- `save_sweep_params()`：改為部分更新（傳 None 的 section 不覆蓋現有資料）；新增 `alloc_results` 參數
+- `sweep_regime_boundary()`：掃描 ±0.5/1/1.5/2/3/5% TWII MA200 切換門檻
+- `sweep_crash_buy_gates()`：掃描熊市 BUY 崩跌加碼條件（5 個預設）
+- `sweep_allocations()`：**新增**三階段配比掃描
+  - Phase 1：bull/warn/bear 倍率組合（4 個預設：均等/溫和/積極/熊市保守）
+  - Phase 2：A 類現金部署比例 a_cash_frac（0.40–0.80 共 5 步）
+  - Phase 3：B 類每筆基礎投入比例 b_base_pct（0.15–0.35 共 5 步）
+  - 每步固定前階段最佳值，避免參數互相干擾
+- `run_portfolio_backtest_v2()`：新增 `bull_mult/warn_mult/bear_mult/a_cash_frac/b_base_pct` 參數
+  - `_regime()` 改用可掃描的 bull/warn/bear 倍率（不再硬編碼 0.90/0.65/0.40）
+  - `deploy_a` 改用 `a_cash_frac`（不再硬編碼 0.60）
+  - B 類每筆 spend 改用 `b_base_pct`（不再硬編碼 0.25）
+
+### 參數掃描 UI（tw_ui.py）
+- 🔬 參數掃描 popup 新增第三個 tab：**配比掃描**
+  - 顯示 14 組 Phase 1/2/3 結果，★ 標示 Calmar 最佳
+  - 掃描順序：Regime → Crash → Allocation（約 10–12 分鐘）
+
+---
+
+## Session 15 — 進行中（2026-05-12）
+
+### 市場回升警報
+- **tw_screener.py**：`get_market_mode()` detail 新增 `twii_ma60` + `twii_vs_ma60_pct`
+- **tw_discord.py**：新增 `build_recovery_alert_embed(alert_type, detail)`
+  - `ma60_cross`：TWII 站回 MA60（早期訊號），建議試探性加碼 25–50%
+  - `ma200_recovery`：mode 從 WARN/RISK 轉 NORMAL（確認訊號），建議分批加碼 50–100%
+- **tw_scheduler.py**：新增 `_save_mode_and_check_recovery(mode, detail)`
+  - 每日掃描後比對昨日 `cache/market_mode_history.json`（保留 60 天）
+  - 偵測到回升即觸發 Discord 推播
+
+### 組合回測 v2（評分自動分配）
+- **tw_backtest_signals.py** 新增：
+  - `_score_day(rsi, close, avwap, signal)` → 0–90分（RSI 25 + AVWAP距離 25 + 信號強度 40）
+  - `_sell_lot_v2(lot, exec_sell)` → 含手續費+稅的賣出計算 helper
+  - `_base_trade(sym, name, lot)` → 交易紀錄 helper
+  - `run_portfolio_backtest_v2(symbols_cfg, annual_injection, sbt_cache, start_date, end_date)`
+    - **A 類**（best_mode=B&H）：年初依評分比例分配年度注資，永不賣出；保留 40% 現金給 B 類
+    - **B 類**（best_mode=信號策略）：各用自己最佳 mode 的進出場，倉位大小 = 10萬×0.25×score_mult×regime_mult
+    - **TWII MA200 regime**：>+2%=0.90（牛）/ ±2%=0.65（警戒）/ <-2%=0.40（熊）
+    - 自動讀取最新 `signal_backtest_*.json` 決定各股分類
+- **tw_ui.py** `_sbt_portfolio_popup`：新增「★ v2 評分自動分配」綠色按鈕（保留 v1 按鈕對比）
+  - v2 結果顯示：A類分類標示 + 持倉明細表 + 資產曲線（含 0050 B&H 對比橘虛線）
+
+### 崩盤中個股買入策略調整
+- **tw_screener.py** `calc_signals()`：新增 `drop_from_60d_high_pct`（距60日高點跌幅）
+- **tw_screener.py** `run_scan()`：RISK 模式 BUY 信號加嚴篩選
+  - RSI < 30 **且** 距高點跌逾 15% → 保留為「崩跌加碼 BUY」（附跌幅標注）
+  - 否則 → 降級為 WATCH（原行為）
+- **tw_discord.py** `build_buy_embed()`：RISK 模式下跌逾 15% 時顯示「💥 崩跌加碼機會」欄位
+  - 說明跌幅、建議首批 30–50% 倉位、等 MA60 站回後補倉
+
+---
+
+## Session 14 — 完成事項（2026-05-06 ～ 2026-05-12）
+
+### 持倉追蹤 tw_portfolio.py（新建）
+- `add_trade / close_trade / delete_trade` CRUD，資料存 `portfolio_trades.json`
+- `fetch_prices(symbols)` — yfinance 批次抓即時報價
+- `calc_open_pnl / calc_closed_pnl` — 含手續費(0.1425%) + 證交稅(0.3%) 損益
+- `target_price / stop_price` — 每筆持倉可設目標/停損價
+
+### tw_ui.py — 持股 Tab 重構
+- 原持股 Tab 拆成兩子 Tab：**📊 持股概覽**（原 config.yaml 不動）+ **📝 交易記錄**
+- 交易記錄：+ 新增持倉 popup / ⟳ 刷新報價 / 未平倉 treeview / 已平倉 treeview
+- 雙擊未平倉列→平倉 popup；右鍵→刪除記錄
+- 停利/停損提醒：觸及 target_price → 金色高亮；觸及 stop_price → 橘紅高亮 + 狀態列提醒
+
+### 掃描表格排序
+- 點欄頭切換 升序 → 降序 → 重置（欄頭箭頭 ↑↓ 提示）
+- `_sort_scan(col)` + `_sort_col` / `_sort_asc` state
+
+### 匯出 CSV
+- 掃描 tab、回測 tab、交易記錄各有「📥 CSV」按鈕
+- UTF-8 BOM，Excel 直接開啟無亂碼
+
+### K 線圖升級（`_chart_popup`）
+- 週期切換：**日K / 週K / 月K** toggle 按鈕
+  - 日K：60日 / 120日 / 180日 / 1年
+  - 週K：6個月 / 1年 / 2年 / 3年（resample "W"）
+  - 月K：1年 / 3年 / 5年 / 10年（resample "ME"）
+- 基本面資訊列（背景載入）：P/E、EPS、殖利率 (Yield)、營收成長 (Rev.G)、ROE
+- 信號標記（△▲▽）僅在日K 模式顯示
+- MA 線使用全部歷史資料計算（避免短期視窗 MA 偏移）
+
+### 策略一致性修正
+- `_load_dca_rec()` 新函數：動態讀取 `dca_backtest_*.json`
+- `tw_discord._dca_context_line()` 移除 RECOMMENDED_DCA 依賴
+- 信號回測快取重跑：含 TRAIL + ALL_DYN 模式（`signal_backtest_2026-05-11.json`）
+- DCA 回測 bug 修正：`_crash_performance(close)` → `_crash_performance(close_adj)`
+
+### 字體 / 字型
+- 全介面字體最小 12pt（位置緊的 11pt）；原 8/9/10pt 全面調升
+
+### GitHub Actions
+- `.github/workflows/tw_daily.yml`：UTC 01:00（台北09:00）+ 06:30（14:30）weekdays
+- `.github/workflows/tw_weekly.yml`：UTC 02:00 Sunday（台北10:00）
+- Secret：`DISCORD_WEBHOOK_URL` 在 repo Settings 設定
+
+### 備份
+- `backup/2026-05-12-s14-final/`：tw_ui.py / tw_portfolio.py / tw_discord.py / tw_backtest_dca.py / FUNCTION_SPEC.md / AI_HANDOFF.md
 
 ---
 
@@ -158,6 +295,10 @@
 - 只有高風險操作（刪除重要資料、force push、外部服務操作）才暫停詢問
 - `bypassPermissions` 已寫入 `~/.claude/settings.json` 與 `.claude/settings.json`，**新 Session 起效**
 - 每次 Session 開始前先更新此文件再動手改程式碼
+- **策略一致性鐵則：掃描 tab「DCA策略」欄、Discord 推播建議策略、DCA tab 顯示策略，必須全部從最新回測快取動態讀取，禁止手動維護 `CATEGORY` rec 欄或 `RECOMMENDED_DCA`。**
+  - 掃描 tab `rec`：從 `dca_backtest_*.json` 按 CAGR 最高選出（`_load_dca_rec()`）
+  - Discord DCA 建議：同上，`_dca_context_line()` 直接從 cache 選最佳，不讀 `RECOMMENDED_DCA`
+  - Discord 信號策略建議：從 `signal_backtest_*.json` 的 `best_mode`（Calmar最高）讀取（`_sbt_context_line()`）
 
 ---
 

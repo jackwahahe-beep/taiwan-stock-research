@@ -81,37 +81,45 @@ def _sbt_context_line(symbol: str, sbt_cache: dict) -> str | None:
         mode   = bm.get("mode", "")
         if mode == "BNH":
             return (f"持有（B&H）優於信號操作  CAGR `{cagr:.1f}%`  "
-                    f"→ 建議長期持有，信號僅用於加碼時機")
+                    f"→ 建議長期持有，信號僅用於加碼時機，**不追隨 SELL 信號**")
         parts = [f"**{label}**", f"CAGR `{cagr:.1f}%`"]
         if mdd is not None:
             parts.append(f"MDD `{mdd:.1f}%`")
         if calmar:
             parts.append(f"Calmar `{calmar:.2f}`")
+        # 補上出場策略提示
+        if mode == "SBUY":
+            parts.append("⚠️ 僅 STRONG BUY 有效，普通 BUY 不推播")
+        elif mode == "TRIM":
+            parts.append("🎯 持有至獲利 **+30%** 止盈出場")
+        elif mode == "TRAIL":
+            parts.append("🎯 追蹤止盈：從高點回落 **-15%** 出場")
+        elif mode in ("ALL_DYN", "ALL"):
+            parts.append("🎯 BUY+SBUY 混合進場，SELL 信號出場")
         return "  ".join(parts)
     except Exception:
         return None
 
 
 def _dca_context_line(symbol: str, dca_cache: dict) -> str | None:
-    """從 DCA 快取取出建議策略的 10 年 CAGR / MDD，供 embed 顯示。"""
+    """從 DCA 快取按 CAGR 選出最佳策略，供 embed 顯示。不依賴硬編碼 RECOMMENDED_DCA。"""
     try:
-        from tw_backtest_dca import RECOMMENDED_DCA
         r = dca_cache.get(symbol)
         if not r:
             return None
-        rec_label = RECOMMENDED_DCA.get(symbol)
-        if not rec_label:
+        strats = r.get("strategies", [])
+        if not strats:
             return None
-        for s in r.get("strategies", []):
-            if s["label"] == rec_label:
-                total = s.get("total_return_pct")
-                cagr  = s.get("cagr_pct")
-                mdd   = s.get("max_drawdown_pct")
-                parts = [f"**{rec_label}**"]
-                if total is not None: parts.append(f"10年報酬 `{total}%`")
-                if cagr  is not None: parts.append(f"CAGR `{cagr}%`")
-                if mdd   is not None: parts.append(f"MDD `{mdd}%`")
-                return "⭐ " + "  ".join(parts)
+        best = max(strats, key=lambda s: s.get("cagr_pct") or 0)
+        rec_label = best.get("label", "")
+        total = best.get("total_return_pct")
+        cagr  = best.get("cagr_pct")
+        mdd   = best.get("max_drawdown_pct")
+        parts = [f"**{rec_label}**"]
+        if total is not None: parts.append(f"10年報酬 `{total}%`")
+        if cagr  is not None: parts.append(f"CAGR `{cagr}%`")
+        if mdd   is not None: parts.append(f"MDD `{mdd}%`")
+        return "⭐ " + "  ".join(parts)
     except Exception:
         pass
     return None
@@ -154,12 +162,22 @@ def build_buy_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
         {"name": "觸發信號",      "value": reasons_text,    "inline": False},
     ]
 
+    # 崩跌加碼機會（RISK 模式 + 跌幅夠深）
+    drop_pct = stock.get("drop_from_60d_high_pct")
+    if market_mode == "RISK" and drop_pct is not None and drop_pct < -15:
+        fields.append({
+            "name":   "💥 崩跌加碼機會",
+            "value":  (f"距 60 日高點已跌 `{drop_pct:.1f}%`，RSI 深度超賣\n"
+                       f"建議**分批進場**：首批 30–50% 倉位，等大盤站回 MA60 後補倉"),
+            "inline": False,
+        })
+
     # 市場模式警示
     if market_mode == "WARN":
         fields.append({"name": "⚠️ 市場警戒模式",
                         "value": "大盤偏弱，建議分批進場，勿一次全押",
                         "inline": False})
-    elif market_mode == "RISK":
+    elif market_mode == "RISK" and (drop_pct is None or drop_pct >= -15):
         fields.append({"name": "🔴 市場風險模式",
                         "value": "大盤趨勢向下，此信號為 STRONG BUY 才推播，嚴控倉位",
                         "inline": False})
@@ -252,8 +270,17 @@ def build_sell_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
 
     # 信號回測最佳策略建議
     sbt_line = _sbt_context_line(sym, sbt_cache or {})
+    bm_mode  = ((sbt_cache or {}).get(sym) or {}).get("best_mode", {}).get("mode", "")
     if sbt_line:
         fields.append({"name": "📋 信號回測建議策略", "value": sbt_line, "inline": False})
+    # BNH 股票加強警告：回測不建議跟 SELL 出場
+    if bm_mode == "BNH":
+        fields.append({
+            "name":  "⚠️ 注意：此股回測建議長期持有",
+            "value": ("回測顯示 B&H 勝過信號策略 — 此 SELL 信號**不建議執行賣出**\n"
+                      "若要調倉，建議僅減碼部分倉位，保留核心持股"),
+            "inline": False,
+        })
 
     # 10 年 DCA 建議策略
     dca_line = _dca_context_line(sym, dca_cache or {})
@@ -425,6 +452,59 @@ def build_market_mode_embed(results: list[dict]) -> dict | None:
     }
 
 
+# ── 市場回升警報 ────────────────────────────────────────────────────────────────
+
+def build_recovery_alert_embed(alert_type: str, detail: dict) -> dict:
+    """
+    alert_type:
+      "ma60_cross"      — TWII 站回 MA60（早期訊號，小額試探）
+      "ma200_recovery"  — TWII 站回 MA200 且 mode 從 WARN/RISK 轉 NORMAL（確認回升）
+    """
+    twii  = detail.get("twii_price", "N/A")
+    ma200 = detail.get("twii_ma200", "N/A")
+    ma60  = detail.get("twii_ma60",  "N/A")
+    vs200 = detail.get("twii_vs_ma200_pct", 0)
+    vs60  = detail.get("twii_vs_ma60_pct",  0)
+    vol   = detail.get("vol_20_annualized", "N/A")
+
+    if alert_type == "ma200_recovery":
+        title  = "⬆️ 市場回升確認：大盤站回 MA200"
+        desc   = ("大盤已站回 200 日均線，市場模式由警戒/風險轉為正常。\n"
+                  "可開始**分批加碼**觀察名單中的強勢股，優先選擇近期有 BUY 信號者。")
+        color  = COLOR["BUY"]
+        advice = "分批加碼，以正常倉位 50–100% 進場"
+    else:  # ma60_cross
+        title  = "📈 市場初步回升：大盤站回 MA60"
+        desc   = ("大盤站回 60 日均線，短期趨勢初步好轉。\n"
+                  "可**小額試探性加碼**，等 MA200 確認後再加大倉位。")
+        color  = COLOR["INFO"]
+        advice = "試探性加碼 25–50%，待 MA200 確認後加倉"
+
+    fields = [
+        {
+            "name":   "📊 大盤即時數據",
+            "value":  (f"TWII `{twii}`\n"
+                       f"MA60  `{ma60}` （`{vs60:+.2f}%`）\n"
+                       f"MA200 `{ma200}` （`{vs200:+.2f}%`）\n"
+                       f"波動率 `{vol}%`"),
+            "inline": True,
+        },
+        {
+            "name":   "💡 建議操作",
+            "value":  advice,
+            "inline": True,
+        },
+    ]
+
+    return {
+        "color":       color,
+        "title":       title,
+        "description": desc,
+        "fields":      fields,
+        "footer":      {"text": f"台股研究系統  {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}"},
+    }
+
+
 # ── 事後驗證推播 ───────────────────────────────────────────────────────────────
 
 def build_outcome_embed(outcome: dict) -> dict | None:
@@ -489,21 +569,36 @@ def send_scan_results(results: list[dict], dca_cache: dict | None = None) -> Non
     buy_embeds  = []
     sell_embeds = []
 
+    try:
+        from tw_backtest_signals import ETF_SYMBOLS as _ETF_SYMS
+    except Exception:
+        _ETF_SYMS = set()
+
     for r in results:
         if not r.get("signals"):
             continue
-        types       = {s["type"] for s in r["signals"]}
-        in_portfolio = r["symbol"] in portfolio_syms
+        sym          = r["symbol"]
+        types        = {s["type"] for s in r["signals"]}
+        in_portfolio = sym in portfolio_syms
+        bm_mode      = (sbt_cache.get(sym) or {}).get("best_mode", {}).get("mode", "")
 
         # 買入推播（非持股）
         if not in_portfolio and types & {"BUY", "STRONG BUY"}:
             # 風險模式：只推 STRONG BUY
             if market_mode == "RISK" and "STRONG BUY" not in types:
                 continue
+            # SBUY-only 股票（best_mode=SBUY）：普通 BUY 不推播，只推 STRONG BUY
+            if bm_mode == "SBUY" and "STRONG BUY" not in types:
+                print(f"[Discord] {sym} best_mode=SBUY，普通BUY跳過")
+                continue
             buy_embeds.append(build_buy_embed(r, cfg, dca_cache=dca_cache, sbt_cache=sbt_cache))
 
         # 賣出推播（僅限持股）
         if "SELL" in types and in_portfolio:
+            # ETF 永不賣出（回測一致性：ETF_SYMBOLS 從不執行 SELL）
+            if sym in _ETF_SYMS:
+                print(f"[Discord] {sym} 為ETF，SELL信號跳過")
+                continue
             sell_embeds.append(build_sell_embed(r, cfg, dca_cache=dca_cache,
                                                 sbt_cache=sbt_cache,
                                                 in_portfolio=in_portfolio))

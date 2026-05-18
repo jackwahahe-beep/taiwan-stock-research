@@ -12,9 +12,10 @@ from datetime import date as _date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BASE_DIR  = Path(__file__).parent
-CACHE_DIR = BASE_DIR / "cache"
-TZ        = ZoneInfo("Asia/Taipei")
+BASE_DIR          = Path(__file__).parent
+CACHE_DIR         = BASE_DIR / "cache"
+TZ                = ZoneInfo("Asia/Taipei")
+_SWEEP_PARAMS_FILE = CACHE_DIR / "param_sweep_results.json"
 
 START_DATE    = "2015-01-01"
 END_DATE      = "2025-12-31"
@@ -79,6 +80,118 @@ def _fetch_twii_bull_series(start: str, end: str) -> pd.Series:
     return bull[bull.index >= pd.Timestamp(start, tz=TZ)]
 
 
+def load_sweep_params() -> dict:
+    """
+    讀取最新的參數掃描結果。
+    找不到檔案 → 回傳硬編碼預設值（2.0% / RSI<30 / 跌>-15%）。
+    你可以直接編輯 cache/param_sweep_results.json 的 recommended 欄位做微調。
+    """
+    defaults = {
+        "regime_threshold": 2.0,
+        "bear_rsi_gate":    30,
+        "bear_drop_gate":   -15.0,
+        "bull_mult":        0.90,
+        "warn_mult":        0.65,
+        "bear_mult":        0.40,
+        "a_cash_frac":      0.60,
+        "b_base_pct":       0.25,
+    }
+    try:
+        if _SWEEP_PARAMS_FILE.exists():
+            data = json.loads(_SWEEP_PARAMS_FILE.read_text(encoding="utf-8"))
+            alloc = data.get("allocation", {})
+            return {
+                "regime_threshold": float(data.get("regime",     {}).get("recommended_threshold_pct", 2.0)),
+                "bear_rsi_gate":    int(  data.get("crash_buy",  {}).get("recommended_rsi_gate",       30)),
+                "bear_drop_gate":   float(data.get("crash_buy",  {}).get("recommended_drop_gate",     -15.0)),
+                "bull_mult":        float(alloc.get("recommended_bull_mult",   0.90)),
+                "warn_mult":        float(alloc.get("recommended_warn_mult",   0.65)),
+                "bear_mult":        float(alloc.get("recommended_bear_mult",   0.40)),
+                "a_cash_frac":      float(alloc.get("recommended_a_cash_frac", 0.60)),
+                "b_base_pct":       float(alloc.get("recommended_b_base_pct",  0.25)),
+            }
+    except Exception:
+        pass
+    return defaults
+
+
+def save_sweep_params(
+    regime_results: list[dict] | None = None,
+    crash_results:  list[dict] | None = None,
+    source_meta:    dict | None = None,
+    alloc_results:  list[dict] | None = None,
+) -> None:
+    """
+    掃描完成後把完整結果 + 建議值存入 cache/param_sweep_results.json。
+    建議值 = Calmar 最高的那組；你可以事後手動修改 recommended_* 欄位做微調。
+    傳 None 的 section 不覆寫（支援只更新部分區塊）。
+    """
+    from datetime import datetime as _dt
+    CACHE_DIR.mkdir(exist_ok=True)
+
+    # 讀取既有資料，避免局部掃描時覆蓋其他 section
+    existing: dict = {}
+    try:
+        if _SWEEP_PARAMS_FILE.exists():
+            existing = json.loads(_SWEEP_PARAMS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+
+    payload: dict = {**existing,
+                     "updated_at": _dt.now(TZ).strftime("%Y-%m-%d %H:%M"),
+                     "source": source_meta or existing.get("source", {})}
+
+    if regime_results:
+        best_r = max(regime_results, key=lambda x: x.get("calmar", 0))
+        payload["regime"] = {
+            "recommended_threshold_pct": best_r.get("threshold_pct", 2.0),
+            "auto_note": f"Calmar 最佳 = ±{best_r.get('threshold_pct',2.0)}%  Calmar={best_r.get('calmar',0):.2f}",
+            "sweep_results": regime_results,
+        }
+        print(f"[sweep] 建議 regime_threshold = ±{payload['regime']['recommended_threshold_pct']}%")
+
+    if crash_results:
+        best_c = max(crash_results, key=lambda x: x.get("calmar", 0))
+        payload["crash_buy"] = {
+            "recommended_rsi_gate":   best_c.get("rsi_gate", 30),
+            "recommended_drop_gate":  best_c.get("drop_gate", -15.0),
+            "auto_note": f"Calmar 最佳 = {best_c.get('label','')}  RSI<{best_c.get('rsi_gate',30)}  跌>{best_c.get('drop_gate',-15.0)}%  Calmar={best_c.get('calmar',0):.2f}",
+            "sweep_results": crash_results,
+        }
+        print(f"[sweep] 建議 crash_buy: RSI<{payload['crash_buy']['recommended_rsi_gate']}  "
+              f"跌>{payload['crash_buy']['recommended_drop_gate']}%")
+
+    if alloc_results:
+        best_a = max(alloc_results, key=lambda x: x.get("calmar", 0))
+        payload["allocation"] = {
+            "recommended_bull_mult":   best_a.get("bull_mult",   0.90),
+            "recommended_warn_mult":   best_a.get("warn_mult",   0.65),
+            "recommended_bear_mult":   best_a.get("bear_mult",   0.40),
+            "recommended_a_cash_frac": best_a.get("a_cash_frac", 0.60),
+            "recommended_b_base_pct":  best_a.get("b_base_pct",  0.25),
+            "auto_note": (
+                f"Calmar 最佳: bull={best_a.get('bull_mult',0.90)}"
+                f" warn={best_a.get('warn_mult',0.65)}"
+                f" bear={best_a.get('bear_mult',0.40)}"
+                f" A-cash={best_a.get('a_cash_frac',0.60)}"
+                f" B-base={best_a.get('b_base_pct',0.25)}"
+                f"  Calmar={best_a.get('calmar',0):.2f}"
+            ),
+            "sweep_results": alloc_results,
+        }
+        a = payload["allocation"]
+        print(f"[sweep] 建議配比: bull={a['recommended_bull_mult']}"
+              f" warn={a['recommended_warn_mult']}"
+              f" bear={a['recommended_bear_mult']}"
+              f" A-cash={a['recommended_a_cash_frac']}"
+              f" B-base={a['recommended_b_base_pct']}")
+
+    tmp = _SWEEP_PARAMS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_SWEEP_PARAMS_FILE)
+    print(f"[sweep] 參數已存至 {_SWEEP_PARAMS_FILE.name}")
+
+
 def _sharpe(eq: pd.Series, rf_annual: float = RISK_FREE) -> float:
     """年化 Sharpe ratio（以日報酬序列計算）。資料不足時回傳 0。"""
     ret = eq.pct_change().dropna()
@@ -86,6 +199,21 @@ def _sharpe(eq: pd.Series, rf_annual: float = RISK_FREE) -> float:
         return 0.0
     rf_daily = rf_annual / 252
     return round((ret.mean() - rf_daily) / ret.std() * (252 ** 0.5), 2)
+
+
+def _sortino(eq: pd.Series, rf_annual: float = RISK_FREE) -> float:
+    """年化 Sortino ratio（只懲罰下行波動）。資料不足時回傳 0。"""
+    ret = eq.pct_change().dropna()
+    if len(ret) < 20:
+        return 0.0
+    rf_daily = rf_annual / 252
+    excess   = ret - rf_daily
+    downside = excess[excess < 0]
+    if len(downside) < 2 or downside.std() == 0:
+        return 0.0
+    ann_exc  = excess.mean() * 252
+    dd_std   = downside.std() * (252 ** 0.5)
+    return round(ann_exc / dd_std, 2)
 
 
 # ── 滾動 AVWAP（與 tw_screener.calc_avwap 邏輯一致）──────────────────────
@@ -997,6 +1125,652 @@ def run_portfolio_backtest(
         "symbols":          list(all_sigs.keys()),
         "bnh_0050":         bnh_0050,
     }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 組合回測 v2 — 評分分配 + 各股最佳策略
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _score_day(rsi: float, close: float, avwap: float, signal: str) -> float:
+    """
+    0–90 分的當日評分：RSI(25) + AVWAP 距離(25) + 信號強度(40)
+    分數越高代表越值得加碼。
+    """
+    s = 0.0
+    # RSI
+    if rsi < 30:       s += 25
+    elif rsi < 40:     s += 18
+    elif rsi < 50:     s += 10
+    elif rsi > 70:     s -= 15
+
+    # AVWAP 距離
+    d = (close - avwap) / avwap * 100 if avwap > 0 else 0
+    if d < -15:    s += 25
+    elif d < -8:   s += 18
+    elif d < -3:   s += 10
+    elif d > 10:   s -= 10
+
+    # 信號強度
+    s += {"STRONG BUY": 40, "BUY": 28, "WATCH": 10, "SELL": -20}.get(signal, 10)
+    return s
+
+
+def _sell_lot_v2(lot: dict, exec_sell: float) -> tuple[float, float, float]:
+    """回傳 (net_proceeds, pnl, total_fees)"""
+    gross   = lot["shares"] * exec_sell
+    s_fee   = round(gross * (COMMISSION_RATE + TAX_RATE), 0)
+    net     = gross - s_fee
+    pnl     = net - lot["cost"]
+    fees    = s_fee + lot.get("buy_fee", 0)
+    return net, pnl, fees
+
+
+def run_portfolio_backtest_v2(
+    symbols_cfg:     list[dict],
+    annual_injection: float = 100_000,
+    sbt_cache:       dict | None = None,
+    start_date:      str  = START_DATE,
+    end_date:        str  = END_DATE,
+    hybrid:           bool         = False,
+    regime_threshold: float | None = None,
+    bear_rsi_gate:    int   | None = None,
+    bear_drop_gate:   float | None = None,
+    bull_mult:        float | None = None,
+    warn_mult:        float | None = None,
+    bear_mult:        float | None = None,
+    a_cash_frac:      float | None = None,
+    b_base_pct:       float | None = None,
+) -> dict:
+    """
+    組合回測 v2 — 評分分配 + 各股最佳策略。
+
+    A 類（B&H 最優）：年初依當日評分比例買入，永不賣出。
+    B 類（信號最優）：各用自己 best_mode 的進出場規則，
+                     倉位大小 = annual_injection × 0.25 × score_mult × regime_mult。
+    hybrid=True：B類同時享有年初 DCA（全股 50%）+ 信號買入（50%保留）。
+    regime_threshold：TWII vs MA200 切換門檻（%），可掃描最佳值（預設 2.0%）。
+    bear_rsi_gate / bear_drop_gate：熊市 BUY 崩跌加碼條件，None=不過濾（預設 RSI<30 跌>15%）。
+    TWII MA200 regime：牛 0.90 / 警戒 0.65 / 熊 0.40。
+    """
+    # 0a. 讀取已驗證的參數（None = 從 param_sweep_results.json 讀，找不到用硬編碼預設）
+    _p = load_sweep_params()
+    if regime_threshold is None: regime_threshold = _p["regime_threshold"]
+    if bear_rsi_gate    is None: bear_rsi_gate    = _p["bear_rsi_gate"]
+    if bear_drop_gate   is None: bear_drop_gate   = _p["bear_drop_gate"]
+    if bull_mult        is None: bull_mult        = _p["bull_mult"]
+    if warn_mult        is None: warn_mult        = _p["warn_mult"]
+    if bear_mult        is None: bear_mult        = _p["bear_mult"]
+    if a_cash_frac      is None: a_cash_frac      = _p["a_cash_frac"]
+    if b_base_pct       is None: b_base_pct       = _p["b_base_pct"]
+
+    # 0. 讀取 signal backtest 快取（list → dict by symbol）
+    if sbt_cache is None:
+        files = sorted(CACHE_DIR.glob("signal_backtest_*.json"))
+        raw = json.loads(files[-1].read_text(encoding="utf-8")) if files else []
+    else:
+        raw = sbt_cache if isinstance(sbt_cache, list) else list(sbt_cache.values())
+    sbt_cache = {item["symbol"]: item for item in raw if isinstance(item, dict) and "symbol" in item}
+
+    # 1. 拉 TWII（regime 判斷）
+    twii_close = pd.Series(dtype=float)
+    try:
+        tw = _fetch("^TWII", start=start_date, end=end_date)
+        if not tw.empty:
+            twii_close = tw["close"].dropna()
+    except Exception:
+        pass
+
+    twii_ma200 = twii_close.rolling(200).mean() if not twii_close.empty else pd.Series(dtype=float)
+
+    def _regime(dt) -> float:
+        try:
+            p = twii_close.loc[dt]; m = twii_ma200.loc[dt]
+            vs = (p - m) / m * 100
+            return bull_mult if vs > regime_threshold else (bear_mult if vs < -regime_threshold else warn_mult)
+        except Exception:
+            return 0.65
+
+    # 2. 拉各股資料 + 信號
+    all_sigs:  dict[str, pd.DataFrame] = {}
+    all_names: dict[str, str]          = {}
+    for cfg in symbols_cfg:
+        sym, name = cfg["symbol"], cfg["name"]
+        df = _fetch(sym, start=start_date, end=end_date)
+        if df.empty or len(df) < 200:
+            continue
+        sig = _daily_signals(df, sym)
+        if len(sig) < 100:
+            continue
+        all_sigs[sym]  = sig
+        all_names[sym] = name
+
+    if not all_sigs:
+        return {"error": "無有效資料", "version": "v2"}
+
+    # 3. 分類 A / B
+    type_a: set[str]              = set()
+    type_b_mode: dict[str, tuple] = {}   # sym → MODES tuple
+
+    for sym in all_sigs:
+        bm      = (sbt_cache.get(sym) or {}).get("best_mode", {})
+        mode_id = bm.get("mode", "BNH") if bm else "BNH"
+        mt      = next((m for m in MODES if m[0] == mode_id), None)
+        if mt:
+            type_b_mode[sym] = mt
+        else:
+            type_a.add(sym)
+
+    print(f"[v2] A類(DCA): {sorted(s.replace('.TW','') for s in type_a)}")
+    print(f"[v2] B類(信號): "
+          f"{[(s.replace('.TW',''), type_b_mode[s][1]) for s in sorted(type_b_mode)]}")
+
+    # 4. 主回測迴圈
+    all_dates = sorted(set().union(*[s.index for s in all_sigs.values()]))
+
+    cash          = 0.0
+    inj_year      = None
+    n_injections  = 0
+    positions_a: dict[str, dict] = {}    # sym → {shares, total_cost}
+    positions_b: dict[str, list] = {}    # sym → [lots]
+    trades:      list[dict]      = []
+    equity_ts:   dict            = {}
+
+    for dt in all_dates:
+        # 年初注資
+        first_day = dt.year != inj_year
+        if first_day:
+            inj_year      = dt.year
+            cash         += annual_injection
+            n_injections += 1
+
+        # 當日各股行情
+        day: dict[str, dict] = {}
+        for sym, sig in all_sigs.items():
+            if dt not in sig.index:
+                continue
+            row  = sig.loc[dt]
+            no   = row.get("next_open") if "next_open" in row.index else None
+            eraw = float(no) if (no is not None and not pd.isna(no) and no > 0) else float(row["close"])
+            day[sym] = {
+                "close":     float(row["close"]),
+                "signal":    str(row["signal"]),
+                "rsi":       float(row["rsi"]),
+                "avwap":     float(row["avwap"]),
+                "dd_pct":    float(row["dd_pct"]),
+                "exec_buy":  eraw * (1 + SLIPPAGE),
+                "exec_sell": eraw * (1 - SLIPPAGE),
+            }
+        if not day:
+            continue
+
+        date_str = dt.date().isoformat()
+        regime   = _regime(dt)
+
+        # ── B 類出場 ──────────────────────────────────────────────────────
+        for sym, lots in list(positions_b.items()):
+            if sym not in day or not lots:
+                continue
+            d   = day[sym]
+            mt  = type_b_mode[sym]
+            _, _, buy_en, sbuy_en, trim_en, trail_en, dyn_en = mt
+            keep = []
+            for lot in lots:
+                sold  = False
+                peak  = lot.get("peak_price", lot["entry_price"])
+                close = d["close"]
+
+                if trail_en and close <= peak * (1 - TRAIL_STOP_PCT):
+                    net, pnl, fees = _sell_lot_v2(lot, d["exec_sell"])
+                    hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
+                    trades.append({**_base_trade(sym, all_names[sym], lot),
+                                   "exit_date": date_str, "exit_price": round(d["exec_sell"], 2),
+                                   "proceeds": round(net, 0), "pnl": round(pnl, 0),
+                                   "pnl_pct": round(pnl/lot["cost"]*100, 2) if lot["cost"] else 0,
+                                   "hold_days": hd, "exit_signal": "TRAILING_STOP",
+                                   "fees": round(fees, 0), "type": "B"})
+                    cash += net; sold = True
+
+                elif trim_en and not sold:
+                    gain = (close - lot["entry_price"]) / lot["entry_price"] * 100
+                    if gain >= TRIM_PROFIT:
+                        net, pnl, fees = _sell_lot_v2(lot, d["exec_sell"])
+                        hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
+                        trades.append({**_base_trade(sym, all_names[sym], lot),
+                                       "exit_date": date_str, "exit_price": round(d["exec_sell"], 2),
+                                       "proceeds": round(net, 0), "pnl": round(pnl, 0),
+                                       "pnl_pct": round(pnl/lot["cost"]*100, 2) if lot["cost"] else 0,
+                                       "hold_days": hd, "exit_signal": "TRIM",
+                                       "fees": round(fees, 0), "type": "B"})
+                        cash += net; sold = True
+
+                elif not sold and d["signal"] == "SELL" and sym not in ETF_SYMBOLS:
+                    net, pnl, fees = _sell_lot_v2(lot, d["exec_sell"])
+                    hd = (dt.date() - _date.fromisoformat(lot["entry_date"])).days
+                    trades.append({**_base_trade(sym, all_names[sym], lot),
+                                   "exit_date": date_str, "exit_price": round(d["exec_sell"], 2),
+                                   "proceeds": round(net, 0), "pnl": round(pnl, 0),
+                                   "pnl_pct": round(pnl/lot["cost"]*100, 2) if lot["cost"] else 0,
+                                   "hold_days": hd, "exit_signal": "SELL",
+                                   "fees": round(fees, 0), "type": "B"})
+                    cash += net; sold = True
+
+                if not sold:
+                    lot["peak_price"] = max(peak, close)
+                    keep.append(lot)
+            positions_b[sym] = keep
+
+        # ── A 類年初進場（評分加權）────────────────────────────────────────
+        if first_day:
+            # hybrid 模式：B類股也加入年初 DCA 池（全部股票均做 DCA）
+            dca_pool = list(type_a) if not hybrid else list(type_a) + list(type_b_mode.keys())
+            a_today = [s for s in dca_pool if s in day]
+            if a_today:
+                scores_a = {s: max(0.0, _score_day(
+                    day[s]["rsi"], day[s]["close"], day[s]["avwap"], day[s]["signal"]
+                )) for s in a_today}
+                total_sc = sum(scores_a.values()) or 1.0
+                # hybrid: 50% 給年初 DCA（B類另保留50%給信號），否則 60% 給 A 類
+                a_frac = 0.50 if hybrid else a_cash_frac
+                deploy_a = min(cash * a_frac, annual_injection * regime)
+                for s in a_today:
+                    alloc  = deploy_a * scores_a[s] / total_sc
+                    if alloc < 500:
+                        continue
+                    ep     = day[s]["exec_buy"]
+                    shares = int(alloc // (ep * (1 + COMMISSION_RATE)))
+                    if shares <= 0:
+                        continue
+                    gross  = shares * ep
+                    b_fee  = round(gross * COMMISSION_RATE, 0)
+                    cost   = gross + b_fee
+                    if cost > cash:
+                        continue
+                    cash  -= cost
+                    if s not in positions_a:
+                        positions_a[s] = {"shares": 0, "total_cost": 0.0}
+                    positions_a[s]["shares"]     += shares
+                    positions_a[s]["total_cost"] += cost
+                    trades.append({
+                        "symbol": s, "name": all_names[s],
+                        "entry_date": date_str, "entry_price": round(ep, 2),
+                        "exit_date": None, "exit_price": None,
+                        "shares": shares, "cost": round(cost, 0),
+                        "proceeds": None, "pnl": None, "pnl_pct": None,
+                        "hold_days": None, "exit_signal": None,
+                        "fees": round(b_fee, 0),
+                        "entry_signal": f"{'DCA-AB' if (hybrid and s in type_b_mode) else 'DCA-A'}(s={scores_a[s]:.0f},r={regime:.0%})",
+                        "type": "A",
+                    })
+
+        # ── B 類進場（best_mode 信號 + 評分倉位）─────────────────────────
+        b_cands = []
+        for sym, mt in type_b_mode.items():
+            if sym not in day:
+                continue
+            if positions_b.get(sym):     # 已持倉，跳過（避免重複加碼）
+                continue
+            d   = day[sym]
+            _, _, buy_en, sbuy_en, trim_en, trail_en, dyn_en = mt
+            sig = d["signal"]
+            if (sig == "STRONG BUY" and sbuy_en) or (sig == "BUY" and buy_en):
+                sc  = _score_day(d["rsi"], d["close"], d["avwap"], sig)
+                pri = 0 if sig == "STRONG BUY" else 1
+                b_cands.append((pri, -sc, sym, d, mt))
+        b_cands.sort(key=lambda x: (x[0], x[1]))
+
+        for pri, neg_sc, sym, d, mt in b_cands:
+            _, _, buy_en, sbuy_en, trim_en, trail_en, dyn_en = mt
+            sc = -neg_sc
+            score_mult = max(0.5, min(2.0, sc / 50)) if sc > 0 else 0.5
+            spend = annual_injection * b_base_pct * score_mult * regime
+            if d["signal"] == "STRONG BUY":
+                spend *= SBUY_MULT
+            # 熊市模式下（regime ≤ 0.40），BUY 信號需符合崩跌加碼條件才執行
+            # bear_rsi_gate/bear_drop_gate = None 表示不過濾（掃描用）
+            if regime <= 0.40 and d["signal"] == "BUY":
+                if bear_rsi_gate is not None and bear_drop_gate is not None:
+                    if not (d["rsi"] < bear_rsi_gate and d["dd_pct"] < bear_drop_gate):
+                        continue  # 熊市普通 BUY → 跳過
+            if dyn_en:
+                rsi_gap  = max(0, (50 - d["rsi"]) / 50)
+                dd_fac   = max(0, (-d["dd_pct"] - 10) / 30)
+                spend   *= min(2.0, max(0.5, 1.0 + rsi_gap * 0.5 + dd_fac * 0.5))
+            if cash < spend * 0.5:
+                continue
+            ep     = d["exec_buy"]
+            shares = int(min(cash, spend) // (ep * (1 + COMMISSION_RATE)))
+            if shares <= 0:
+                continue
+            gross  = shares * ep
+            b_fee  = round(gross * COMMISSION_RATE, 0)
+            cost   = gross + b_fee
+            cash  -= cost
+            lot = {"shares": shares, "cost": round(cost, 0),
+                   "entry_price": round(ep, 2), "entry_date": date_str,
+                   "buy_fee": b_fee, "entry_signal": d["signal"],
+                   "peak_price": d["close"]}
+            positions_b.setdefault(sym, []).append(lot)
+            trades.append({
+                "symbol": sym, "name": all_names[sym],
+                "entry_date": date_str, "entry_price": round(ep, 2),
+                "exit_date": None, "exit_price": None,
+                "shares": shares, "cost": round(cost, 0),
+                "proceeds": None, "pnl": None, "pnl_pct": None,
+                "hold_days": None, "exit_signal": None,
+                "fees": round(b_fee, 0),
+                "entry_signal": f"{d['signal']}(s={sc:.0f},r={regime:.0%})",
+                "type": "B",
+            })
+
+        # 當日組合市值
+        val_a = sum(pos["shares"] * day[s]["close"]
+                    for s, pos in positions_a.items() if s in day)
+        val_b = sum(sum(l["shares"] for l in lots) * day[s]["close"]
+                    for s, lots in positions_b.items() if s in day and lots)
+        equity_ts[dt] = cash + val_a + val_b
+
+    # 5. 期末：B 類強制平倉，A 類計市值
+    last_prices = {sym: float(sig["close"].iloc[-1]) for sym, sig in all_sigs.items()}
+    last_dt     = max(s.index[-1] for s in all_sigs.values())
+    date_end    = last_dt.date().isoformat()
+
+    for sym, lots in list(positions_b.items()):
+        for lot in lots:
+            lp    = last_prices.get(sym, lot["entry_price"])
+            ep    = lp * (1 - SLIPPAGE)
+            net, pnl, fees = _sell_lot_v2(lot, ep)
+            hd    = (last_dt.date() - _date.fromisoformat(lot["entry_date"])).days
+            trades.append({**_base_trade(sym, all_names[sym], lot),
+                           "exit_date": date_end, "exit_price": round(ep, 2),
+                           "proceeds": round(net, 0), "pnl": round(pnl, 0),
+                           "pnl_pct": round(pnl/lot["cost"]*100, 2) if lot["cost"] else 0,
+                           "hold_days": hd, "exit_signal": "PERIOD_END",
+                           "fees": round(fees, 0), "type": "B"})
+            cash += net
+
+    a_final_val = sum(pos["shares"] * last_prices.get(s, 0) for s, pos in positions_a.items())
+
+    # 6. 統計
+    total_invested = annual_injection * n_injections
+    final_value    = cash + a_final_val
+    total_return   = (final_value - total_invested) / total_invested * 100 if total_invested else 0
+    n_yrs          = max(1.0, (last_dt.date() - all_dates[0].date()).days / 365.25)
+    cagr           = ((final_value / total_invested) ** (1 / n_yrs) - 1) * 100 if total_invested > 0 else 0
+
+    eq = pd.Series(equity_ts)
+    mdd     = float(((eq / eq.cummax()) - 1).min() * 100) if len(eq) > 1 else 0.0
+    calmar  = round(-cagr / mdd, 2) if mdd < 0 else 0.0
+    sharpe  = _sharpe(eq)
+    sortino = _sortino(eq)
+
+    closed  = [t for t in trades if t.get("exit_date") and t.get("pnl") is not None]
+    n_wins  = sum(1 for t in closed if (t.get("pnl") or 0) > 0)
+
+    a_breakdown = {
+        s: {
+            "shares":          pos["shares"],
+            "total_cost":      round(pos["total_cost"], 0),
+            "market_value":    round(pos["shares"] * last_prices.get(s, 0), 0),
+            "unrealized_pnl":  round(pos["shares"] * last_prices.get(s, 0) - pos["total_cost"], 0),
+        }
+        for s, pos in positions_a.items()
+    }
+
+    bnh_0050 = _portfolio_bnh_0050(annual_injection, start_date, end_date)
+
+    mode_str = "+混合" if hybrid else ""
+    print(f"[v2{mode_str}組合回測] {len(all_sigs)}檔  CAGR {cagr:+.1f}%"
+          f"  Sharpe {sharpe:.2f}  MDD {mdd:.1f}%  Calmar {calmar:.2f}"
+          f"  A類:{len(type_a)} B類:{len(type_b_mode)}")
+
+    return {
+        "version":          "v2",
+        "hybrid":           hybrid,
+        "annual_injection": annual_injection,
+        "total_injected":   round(total_invested, 0),
+        "final_value":      round(final_value, 0),
+        "total_pnl":        round(final_value - total_invested, 0),
+        "cagr_pct":         round(cagr, 1),
+        "mdd_pct":          round(mdd, 1),
+        "calmar":           calmar,
+        "sharpe":           sharpe,
+        "sortino":          sortino,
+        "n_trades":         len(closed),
+        "n_wins":           n_wins,
+        "win_rate":         round(n_wins / len(closed) * 100, 1) if closed else 0.0,
+        "total_fees":       round(sum(t.get("fees", 0) for t in trades), 0),
+        "equity_series":    eq,
+        "trades":           trades,
+        "type_a_symbols":   sorted(type_a),
+        "type_b_symbols":   sorted(type_b_mode.keys()),
+        "type_b_modes":     {s: mt[1] for s, mt in type_b_mode.items()},
+        "type_a_breakdown": a_breakdown,
+        "start_date":       all_dates[0].date().isoformat(),
+        "end_date":         date_end,
+        "symbols":          list(all_sigs.keys()),
+        "bnh_0050":         bnh_0050,
+    }
+
+
+def _base_trade(sym: str, name: str, lot: dict) -> dict:
+    return {
+        "symbol": sym, "name": name,
+        "entry_date": lot["entry_date"], "entry_price": lot["entry_price"],
+        "shares": lot["shares"], "cost": lot["cost"],
+        "entry_signal": lot.get("entry_signal", ""),
+    }
+
+
+def _compact_stats(r: dict) -> dict:
+    """取 v2 回測結果的核心指標，供掃描彙整用。"""
+    return {
+        "cagr":    r.get("cagr_pct", 0),
+        "mdd":     r.get("mdd_pct", 0),
+        "calmar":  r.get("calmar", 0),
+        "sharpe":  r.get("sharpe", 0),
+        "sortino": r.get("sortino", 0),
+        "n_trades": r.get("n_trades", 0),
+        "win_rate": r.get("win_rate", 0),
+    }
+
+
+def sweep_regime_boundary(
+    symbols_cfg:      list[dict],
+    annual_injection: float = 100_000,
+    thresholds:       list[float] | None = None,
+    start_date:       str = START_DATE,
+    end_date:         str = END_DATE,
+    _fixed_crash:     dict | None = None,
+) -> list[dict]:
+    """
+    掃描 TWII MA200 切換門檻（regime_threshold）。
+    固定 crash gate 避免互相干擾；結果連同最佳值存入 param_sweep_results.json。
+    """
+    if thresholds is None:
+        thresholds = [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]
+    crash = _fixed_crash or load_sweep_params()
+
+    results = []
+    for thr in thresholds:
+        print(f"[sweep_regime] threshold=±{thr}%...")
+        r = run_portfolio_backtest_v2(
+            symbols_cfg, annual_injection=annual_injection,
+            start_date=start_date, end_date=end_date,
+            regime_threshold=thr,
+            bear_rsi_gate=crash["bear_rsi_gate"],
+            bear_drop_gate=crash["bear_drop_gate"],
+        )
+        if "error" in r:
+            continue
+        row = {"threshold_pct": thr, **_compact_stats(r)}
+        results.append(row)
+        print(f"  CAGR={row['cagr']:+.1f}%  MDD={row['mdd']:.1f}%  Calmar={row['calmar']:.2f}")
+
+    if results:
+        best = max(results, key=lambda x: x["calmar"])
+        print(f"[sweep_regime] 最佳門檻 = ±{best['threshold_pct']}%  Calmar={best['calmar']:.2f}")
+    return results
+
+
+def sweep_crash_buy_gates(
+    symbols_cfg:      list[dict],
+    annual_injection: float = 100_000,
+    start_date:       str = START_DATE,
+    end_date:         str = END_DATE,
+    _fixed_regime:    float | None = None,
+) -> list[dict]:
+    """
+    掃描熊市下 BUY 崩跌加碼條件（5 個梯度）。
+    固定 regime_threshold 避免互相干擾；結果連同最佳值存入 param_sweep_results.json。
+    """
+    gate_presets = [
+        ("禁止BUY", 0,    0.0),
+        ("嚴格",    25,  -20.0),
+        ("預設",    30,  -15.0),
+        ("寬鬆",    35,  -10.0),
+        ("不過濾",  None, None),
+    ]
+    reg_thr = _fixed_regime if _fixed_regime is not None else load_sweep_params()["regime_threshold"]
+
+    results = []
+    for label, rsi_g, drop_g in gate_presets:
+        print(f"[sweep_crash] {label}  RSI<{rsi_g}  drop<{drop_g}%")
+        r = run_portfolio_backtest_v2(
+            symbols_cfg, annual_injection=annual_injection,
+            start_date=start_date, end_date=end_date,
+            regime_threshold=reg_thr,
+            bear_rsi_gate=rsi_g,
+            bear_drop_gate=drop_g,
+        )
+        if "error" in r:
+            continue
+        row = {"label": label, "rsi_gate": rsi_g, "drop_gate": drop_g,
+               **_compact_stats(r)}
+        results.append(row)
+        print(f"  CAGR={row['cagr']:+.1f}%  MDD={row['mdd']:.1f}%  Calmar={row['calmar']:.2f}")
+
+    if results:
+        best = max(results, key=lambda x: x["calmar"])
+        print(f"[sweep_crash] 最佳設定 = {best['label']}  Calmar={best['calmar']:.2f}")
+    return results
+
+
+def sweep_allocations(
+    symbols_cfg:      list[dict],
+    annual_injection: float = 100_000,
+    start_date:       str = START_DATE,
+    end_date:         str = END_DATE,
+) -> list[dict]:
+    """
+    三階段配比掃描（固定已最佳化的 regime/crash 參數）：
+    Phase 1 — bull/warn/bear 倍率組合（4 個預設）
+    Phase 2 — A 類現金部署比例 a_cash_frac（5 個值）
+    Phase 3 — B 類每筆基礎投入比例 b_base_pct（5 個值）
+    結果寫入 cache/param_sweep_results.json 的 allocation 區塊。
+    """
+    p = load_sweep_params()
+    reg_thr  = p["regime_threshold"]
+    bear_rsi = p["bear_rsi_gate"]
+    bear_drp = p["bear_drop_gate"]
+
+    all_results: list[dict] = []
+
+    # ── Phase 1：牛熊倍率組合 ────────────────────────────────────────────────
+    regime_presets = [
+        ("均等部署",  0.80, 0.70, 0.60),
+        ("溫和區分",  0.90, 0.65, 0.40),   # 現行預設
+        ("積極區分",  1.00, 0.60, 0.30),
+        ("熊市保守",  0.85, 0.60, 0.20),
+    ]
+    print("[sweep_alloc] Phase 1 — 牛熊倍率組合")
+    p1_results = []
+    for label, bm, wm, brm in regime_presets:
+        print(f"  {label}  bull={bm} warn={wm} bear={brm}")
+        r = run_portfolio_backtest_v2(
+            symbols_cfg, annual_injection=annual_injection,
+            start_date=start_date, end_date=end_date,
+            regime_threshold=reg_thr,
+            bear_rsi_gate=bear_rsi, bear_drop_gate=bear_drp,
+            bull_mult=bm, warn_mult=wm, bear_mult=brm,
+            a_cash_frac=0.60, b_base_pct=0.25,
+        )
+        if "error" in r:
+            continue
+        row = {"phase": 1, "label": label,
+               "bull_mult": bm, "warn_mult": wm, "bear_mult": brm,
+               "a_cash_frac": 0.60, "b_base_pct": 0.25, **_compact_stats(r)}
+        p1_results.append(row)
+        all_results.append(row)
+        print(f"    CAGR={row['cagr']:+.1f}%  MDD={row['mdd']:.1f}%  Calmar={row['calmar']:.2f}")
+
+    best_p1 = max(p1_results, key=lambda x: x["calmar"]) if p1_results else {
+        "bull_mult": 0.90, "warn_mult": 0.65, "bear_mult": 0.40,
+        "a_cash_frac": 0.60, "b_base_pct": 0.25, "calmar": 0,
+    }
+    print(f"[sweep_alloc] Phase 1 最佳: {best_p1.get('label','')}  Calmar={best_p1.get('calmar',0):.2f}")
+
+    # ── Phase 2：A 類現金部署比例 ───────────────────────────────────────────
+    print("[sweep_alloc] Phase 2 — A 類現金部署比例 a_cash_frac")
+    p2_results = []
+    for af in [0.40, 0.50, 0.60, 0.70, 0.80]:
+        print(f"  a_cash_frac={af}")
+        r = run_portfolio_backtest_v2(
+            symbols_cfg, annual_injection=annual_injection,
+            start_date=start_date, end_date=end_date,
+            regime_threshold=reg_thr,
+            bear_rsi_gate=bear_rsi, bear_drop_gate=bear_drp,
+            bull_mult=best_p1["bull_mult"], warn_mult=best_p1["warn_mult"],
+            bear_mult=best_p1["bear_mult"],
+            a_cash_frac=af, b_base_pct=0.25,
+        )
+        if "error" in r:
+            continue
+        row = {"phase": 2,
+               "bull_mult": best_p1["bull_mult"], "warn_mult": best_p1["warn_mult"],
+               "bear_mult": best_p1["bear_mult"],
+               "a_cash_frac": af, "b_base_pct": 0.25, **_compact_stats(r)}
+        p2_results.append(row)
+        all_results.append(row)
+        print(f"    CAGR={row['cagr']:+.1f}%  MDD={row['mdd']:.1f}%  Calmar={row['calmar']:.2f}")
+
+    best_p2 = max(p2_results, key=lambda x: x["calmar"]) if p2_results else {
+        **best_p1, "a_cash_frac": 0.60,
+    }
+    print(f"[sweep_alloc] Phase 2 最佳: a_cash_frac={best_p2.get('a_cash_frac',0.60)}  Calmar={best_p2.get('calmar',0):.2f}")
+
+    # ── Phase 3：B 類每筆基礎投入比例 ───────────────────────────────────────
+    print("[sweep_alloc] Phase 3 — B 類每筆基礎投入比例 b_base_pct")
+    p3_results = []
+    for bp in [0.15, 0.20, 0.25, 0.30, 0.35]:
+        print(f"  b_base_pct={bp}")
+        r = run_portfolio_backtest_v2(
+            symbols_cfg, annual_injection=annual_injection,
+            start_date=start_date, end_date=end_date,
+            regime_threshold=reg_thr,
+            bear_rsi_gate=bear_rsi, bear_drop_gate=bear_drp,
+            bull_mult=best_p2["bull_mult"], warn_mult=best_p2["warn_mult"],
+            bear_mult=best_p2["bear_mult"],
+            a_cash_frac=best_p2["a_cash_frac"], b_base_pct=bp,
+        )
+        if "error" in r:
+            continue
+        row = {"phase": 3,
+               "bull_mult": best_p2["bull_mult"], "warn_mult": best_p2["warn_mult"],
+               "bear_mult": best_p2["bear_mult"],
+               "a_cash_frac": best_p2["a_cash_frac"], "b_base_pct": bp,
+               **_compact_stats(r)}
+        p3_results.append(row)
+        all_results.append(row)
+        print(f"    CAGR={row['cagr']:+.1f}%  MDD={row['mdd']:.1f}%  Calmar={row['calmar']:.2f}")
+
+    if p3_results:
+        best_final = max(p3_results, key=lambda x: x["calmar"])
+        print(f"[sweep_alloc] 最終最佳: b_base_pct={best_final.get('b_base_pct',0.25)}"
+              f"  Calmar={best_final.get('calmar',0):.2f}")
+
+    if all_results:
+        save_sweep_params(alloc_results=all_results)
+    return all_results
+
 
 if __name__ == "__main__":
     results = run_signal_backtest_all()

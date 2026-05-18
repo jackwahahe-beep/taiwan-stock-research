@@ -360,7 +360,7 @@ def run_dca_backtest(symbol: str, name: str, cfg: dict,
                      indicator_series={"市場模式": mode_aligned, "DD%": dd * 100}),
         ]
 
-    crashes = _crash_performance(close)
+    crashes = _crash_performance(close_adj)
     result  = {
         "symbol":           symbol,
         "name":             name,

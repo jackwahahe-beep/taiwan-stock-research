@@ -80,8 +80,9 @@ def _sbt_context_line(symbol: str, sbt_cache: dict) -> str | None:
         calmar = bm.get("calmar", 0) or 0
         mode   = bm.get("mode", "")
         if mode == "BNH":
-            return (f"持有（B&H）優於信號操作  CAGR `{cagr:.1f}%`  "
-                    f"→ 建議長期持有，信號僅用於加碼時機，**不追隨 SELL 信號**")
+            return (f"A類股（B&H策略）CAGR `{cagr:.1f}%` — "
+                    f"回測建議**年初分批買入、長期持有**\n"
+                    f"此 BUY 信號可視為**分批加碼時機**，非信號策略進場 — **不追隨 SELL 信號**")
         parts = [f"**{label}**", f"CAGR `{cagr:.1f}%`"]
         if mdd is not None:
             parts.append(f"MDD `{mdd:.1f}%`")
@@ -273,12 +274,26 @@ def build_sell_embed(stock: dict, cfg: dict, dca_cache: dict | None = None,
     bm_mode  = ((sbt_cache or {}).get(sym) or {}).get("best_mode", {}).get("mode", "")
     if sbt_line:
         fields.append({"name": "📋 信號回測建議策略", "value": sbt_line, "inline": False})
-    # BNH 股票加強警告：回測不建議跟 SELL 出場
+    # BNH / TRIM / TRAIL 股票：SELL 信號不等於出場條件
     if bm_mode == "BNH":
         fields.append({
-            "name":  "⚠️ 注意：此股回測建議長期持有",
+            "name":  "⚠️ A類股：回測建議長期持有",
             "value": ("回測顯示 B&H 勝過信號策略 — 此 SELL 信號**不建議執行賣出**\n"
                       "若要調倉，建議僅減碼部分倉位，保留核心持股"),
+            "inline": False,
+        })
+    elif bm_mode == "TRIM":
+        fields.append({
+            "name":  "⚠️ B類股（TRIM 止盈策略）",
+            "value": ("回測建議持有至**持倉獲利 +30%** 才出場，而非跟隨 SELL 信號\n"
+                      "此 SELL 僅供參考 — 請確認目前獲利是否已達門檻"),
+            "inline": False,
+        })
+    elif bm_mode == "TRAIL":
+        fields.append({
+            "name":  "⚠️ B類股（TRAIL 追蹤止盈策略）",
+            "value": ("回測建議持有至**從持倉高點回落 -15%** 才出場，而非跟隨 SELL 信號\n"
+                      "此 SELL 僅供參考 — 請確認是否從高點跌超過門檻"),
             "inline": False,
         })
 

@@ -4288,6 +4288,54 @@ class TwStrategyApp(ctk.CTk):
                             note,
                         ))
 
+                # 近 1 年 OOS 驗證頁
+                oos = res.get("oos_1yr") or {}
+                oos_frame = tk.Frame(nb, bg="#0f1a30")
+                nb.add(oos_frame, text="近1年OOS驗證")
+
+                if not oos:
+                    tk.Label(oos_frame, text="OOS 資料不足（需至少 20 個交易日）",
+                             fg="#aaa", bg="#0f1a30",
+                             font=(self.ui_font, 11)).pack(expand=True)
+                else:
+                    beats = oos.get("beats_0050", False)
+                    result_color = "#2ecc71" if beats else "#e74c3c"
+                    result_text  = "✅ 近1年跑贏 0050" if beats else "❌ 近1年落後 0050"
+
+                    tk.Label(oos_frame,
+                             text=result_text,
+                             fg=result_color, bg="#0f1a30",
+                             font=(self.ui_font, 13, "bold")).pack(pady=(16, 4))
+                    tk.Label(oos_frame,
+                             text=f"驗證區間：{oos.get('period','')}",
+                             fg="#aaa", bg="#0f1a30",
+                             font=(self.ui_font, 10)).pack()
+
+                    oos_metrics = [
+                        ("策略 CAGR",  f"{oos.get('cagr_pct',0):+.1f}%",  "#74b9ff"),
+                        ("0050 CAGR",  f"{oos.get('0050_cagr',0):+.1f}%",  "#fdcb6e"),
+                        ("區間報酬",   f"{oos.get('return_pct',0):+.1f}%",  "#a29bfe"),
+                        ("MDD",        f"{oos.get('mdd_pct',0):.1f}%",       "#e17055"),
+                        ("Sharpe",     f"{oos.get('sharpe',0):.2f}",          "#55efc4"),
+                    ]
+                    grid_f = tk.Frame(oos_frame, bg="#0f1a30")
+                    grid_f.pack(pady=14, padx=20, fill="x")
+                    for i, (lbl, val, col) in enumerate(oos_metrics):
+                        tk.Label(grid_f, text=lbl, fg="#888", bg="#0f1a30",
+                                 font=(self.ui_font, 10)).grid(row=0, column=i, padx=18)
+                        tk.Label(grid_f, text=val, fg=col, bg="#0f1a30",
+                                 font=(self.ui_font, 12, "bold")).grid(row=1, column=i, padx=18)
+
+                    note_txt = (
+                        "說明：best_mode 由全期（2015–2025）回測選出，\n"
+                        "以上為該策略在最近 12 個月（未參與訓練）的實際績效。\n"
+                        "若持續落後 0050，建議重新跑參數掃描並更新策略。"
+                    )
+                    tk.Label(oos_frame, text=note_txt,
+                             fg="#888", bg="#0f1a30",
+                             font=(self.ui_font, 10),
+                             justify="left").pack(pady=12, padx=20, anchor="w")
+
             bf = tk.Frame(win, bg="#0f1a30")
             bf.pack(fill="x", padx=12, pady=(4, 0))
             tk.Button(bf, text="📋 交易明細",

@@ -1517,10 +1517,40 @@ def run_portfolio_backtest_v2(
 
     bnh_0050 = _portfolio_bnh_0050(annual_injection, start_date, end_date)
 
+    # 近 12 個月 out-of-sample 驗證（best_mode 由全期回測決定，此段為 OOS）
+    oos_1yr: dict = {}
+    try:
+        oos_cut = eq.index[-1] - pd.Timedelta(days=365)
+        eq_oos  = eq[eq.index >= oos_cut]
+        if len(eq_oos) >= 20:
+            oos_yrs   = max(0.01, (eq_oos.index[-1] - eq_oos.index[0]).days / 365.25)
+            oos_ret   = (eq_oos.iloc[-1] / eq_oos.iloc[0] - 1) * 100
+            oos_cagr  = ((eq_oos.iloc[-1] / eq_oos.iloc[0]) ** (1 / oos_yrs) - 1) * 100
+            oos_mdd   = float((eq_oos / eq_oos.cummax() - 1).min() * 100)
+            oos_sh    = _sharpe(eq_oos)
+            ref_eq    = bnh_0050.get("equity_series", pd.Series(dtype=float))
+            ref_oos   = ref_eq[ref_eq.index >= oos_cut] if not ref_eq.empty else pd.Series(dtype=float)
+            oos_0050  = 0.0
+            if len(ref_oos) >= 20:
+                r_yrs    = max(0.01, (ref_oos.index[-1] - ref_oos.index[0]).days / 365.25)
+                oos_0050 = ((ref_oos.iloc[-1] / ref_oos.iloc[0]) ** (1 / r_yrs) - 1) * 100
+            oos_1yr = {
+                "period":      f"{oos_cut.date()} ~ {eq.index[-1].date()}",
+                "return_pct":  round(oos_ret, 1),
+                "cagr_pct":    round(oos_cagr, 1),
+                "mdd_pct":     round(oos_mdd, 1),
+                "sharpe":      oos_sh,
+                "0050_cagr":   round(oos_0050, 1),
+                "beats_0050":  oos_cagr > oos_0050,
+            }
+    except Exception:
+        pass
+
     mode_str = "+混合" if hybrid else ""
     print(f"[v2{mode_str}組合回測] {len(all_sigs)}檔  CAGR {cagr:+.1f}%"
           f"  Sharpe {sharpe:.2f}  MDD {mdd:.1f}%  Calmar {calmar:.2f}"
-          f"  A類:{len(type_a)} B類:{len(type_b_mode)}")
+          f"  A類:{len(type_a)} B類:{len(type_b_mode)}"
+          + (f"  OOS-1yr {oos_1yr.get('cagr_pct',0):+.1f}%" if oos_1yr else ""))
 
     return {
         "version":          "v2",
@@ -1548,6 +1578,7 @@ def run_portfolio_backtest_v2(
         "end_date":         date_end,
         "symbols":          list(all_sigs.keys()),
         "bnh_0050":         bnh_0050,
+        "oos_1yr":          oos_1yr,
     }
 
 

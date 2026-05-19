@@ -225,6 +225,54 @@ def run_dca():
     print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
 
 
+def run_sweep():
+    """執行三層參數掃描（regime / crash gate / 配比），結果存入 cache/param_sweep_results.json。"""
+    from tw_backtest_signals import (sweep_regime_boundary, sweep_crash_buy_gates,
+                                     sweep_allocations, save_sweep_params, load_sweep_params)
+    from tw_discord import send_webhook, load_config as discord_cfg
+
+    print(f"\n{'='*50}")
+    print(f"參數掃描啟動 {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}\n")
+
+    cfg = discord_cfg()
+    webhook_url = cfg["discord"]["webhook_url"]
+
+    raw = cfg.get("watchlist", {})
+    symbols_cfg = [
+        {"symbol": item["symbol"], "name": item["name"]}
+        for items in raw.values()
+        for item in items
+        if not item.get("backtest_only", False)
+    ]
+    annual = cfg.get("trade_budget", 100_000)
+
+    print("=== Phase 1: Regime 門檻掃描 ===")
+    r_res = sweep_regime_boundary(symbols_cfg, annual_injection=annual)
+    best_reg = max(r_res, key=lambda x: x["calmar"])["threshold_pct"] if r_res else 2.0
+
+    print("=== Phase 2: Crash Gate 掃描 ===")
+    c_res = sweep_crash_buy_gates(symbols_cfg, annual_injection=annual, _fixed_regime=best_reg)
+    save_sweep_params(r_res, c_res, source_meta={
+        "trigger": "auto-scheduler",
+        "date": datetime.now(TZ).strftime("%Y-%m-%d"),
+    })
+
+    print("=== Phase 3: 配比掃描 ===")
+    sweep_allocations(symbols_cfg, annual_injection=annual)
+
+    p = load_sweep_params()
+    ok = send_webhook({"content": (
+        f"\U0001f52c **參數掃描完成** ({datetime.now(TZ).strftime('%Y-%m-%d')})\n"
+        f"Regime ±`{p['regime_threshold']}%`  "
+        f"熊市 RSI<`{p['bear_rsi_gate']}`  跌>`{p['bear_drop_gate']}%`\n"
+        f"bull/warn/bear: `{p['bull_mult']}`/`{p['warn_mult']}`/`{p['bear_mult']}`  "
+        f"A-cash: `{p['a_cash_frac']}`  B-base: `{p['b_base_pct']}`"
+    )}, webhook_url)
+    print(f"[Discord] 掃描結果推播 — {'成功' if ok else '失敗'}")
+    print(f"\n完成 {datetime.now(TZ).strftime('%H:%M:%S')}")
+
+
 def run_signal_bt():
     """執行 10 年跟單回測（4 種模式），結果儲存至 cache/signal_backtest_*.json。"""
     from tw_backtest_signals import run_signal_backtest_all, build_signal_backtest_embed
@@ -296,6 +344,8 @@ if __name__ == "__main__":
         run_weekly_report()
     elif "--signal-bt" in sys.argv:
         run_signal_bt()
+    elif "--sweep" in sys.argv:
+        run_sweep()
     elif "--backfill" in sys.argv:
         backfill_outcomes()
     elif "--outcome" in sys.argv:

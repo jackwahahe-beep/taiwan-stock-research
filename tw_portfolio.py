@@ -165,3 +165,76 @@ def calc_closed_pnl(trade: dict) -> dict:
         "pnl": round(pnl, 0),
         "pnl_pct": round(pnl_pct, 2),
     }
+
+
+def run_portfolio_check() -> list[dict]:
+    """
+    檢查所有未平倉持股的即時損益 + 目標/停損觸發情況。
+    回傳 list[dict]，每個 entry 包含 trade / pnl / advice。
+    advice["push"] = True 代表需要 Discord 推播。
+    """
+    trades = get_open()
+    if not trades:
+        return []
+
+    symbols = [t["symbol"] for t in trades]
+    prices  = fetch_prices(symbols)
+
+    results = []
+    for t in trades:
+        raw   = t["symbol"].replace(".TW", "").upper()
+        price = prices.get(raw) or prices.get(t["symbol"]) or 0.0
+        if not price:
+            continue
+
+        pnl    = calc_open_pnl(t, price)
+        target = t.get("target_price")
+        stop   = t.get("stop_price")
+
+        if target and price >= target:
+            advice = {"push": True, "reason": f"達目標價 {target:.2f}", "type": "TARGET"}
+        elif stop and price <= stop:
+            advice = {"push": True, "reason": f"觸及停損 {stop:.2f}", "type": "STOP"}
+        else:
+            advice = {"push": False, "reason": "持有中", "type": "HOLD"}
+
+        results.append({"trade": t, "pnl": pnl, "advice": advice})
+
+    return results
+
+
+def build_portfolio_embeds(results: list[dict]) -> list[dict]:
+    """
+    為有操作建議的持倉建立 Discord embed list（push=True 的才輸出）。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+
+    embeds = []
+    for r in results:
+        if not r["advice"].get("push"):
+            continue
+        t      = r["trade"]
+        pnl    = r["pnl"]
+        advice = r["advice"]
+
+        adv_type = advice.get("type", "HOLD")
+        color = 0x2ECC71 if adv_type == "TARGET" else (0xE74C3C if adv_type == "STOP" else 0x3498DB)
+        icon  = "🎯" if adv_type == "TARGET" else ("🛑" if adv_type == "STOP" else "ℹ️")
+
+        pct   = pnl.get("pnl_pct", 0)
+        sign  = "+" if pct >= 0 else ""
+        embeds.append({
+            "color": color,
+            "title": f"{icon} {t['symbol']} {t.get('name', '')} — {advice['reason']}",
+            "fields": [
+                {"name": "現價",     "value": f"`{pnl['current_price']:.2f}`",                       "inline": True},
+                {"name": "持倉損益", "value": f"`{sign}{pct:.1f}%` (NT${pnl.get('pnl',0):+,.0f})", "inline": True},
+                {"name": "持股數",   "value": f"`{t['shares']} 股`",                                  "inline": True},
+                {"name": "買入成本", "value": f"`{t['buy_price']:.2f}`",                              "inline": True},
+            ],
+            "footer": {"text": now},
+        })
+
+    return embeds
